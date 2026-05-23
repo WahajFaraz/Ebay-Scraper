@@ -9,7 +9,7 @@ import streamlit as st
 import pandas as pd
 from io import BytesIO
 from bs4 import BeautifulSoup
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse, parse_qs, quote_plus
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from selenium import webdriver
@@ -55,7 +55,7 @@ def normalize_store_url(url):
 
     url = re.sub(r"[?&]_pgn=\d+", "", url)
     url = url.rstrip("?&")
-    if "_ipg=" not in url:
+    if is_ebay_store_url(url) and "_ipg=" not in url:
         url += ("&" if "?" in url else "?") + "_ipg=240"
     return url
 
@@ -119,39 +119,54 @@ def clean_price(value):
 
 def create_http_session():
     from requests.adapters import Retry
+    import http.cookiejar
+    
     session = requests.Session()
     retry_strategy = Retry(
-        total=4,
+        total=5,
         status_forcelist=[429, 500, 502, 503, 504],
-        allowed_methods=["GET"],
-        backoff_factor=1.5,
+        allowed_methods=["GET", "HEAD"],
+        backoff_factor=1.2,
     )
     adapter = requests.adapters.HTTPAdapter(max_retries=retry_strategy, pool_connections=100, pool_maxsize=100)
     session.mount("http://", adapter)
     session.mount("https://", adapter)
+    
+    # More comprehensive headers to mimic real browser behavior
     session.headers.update(
         {
             "User-Agent": DEFAULT_USER_AGENT,
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.9",
+            "Accept-Encoding": "gzip, deflate, br",
+            "Accept-Language": "en-US,en;q=0.9,en-GB;q=0.8",
+            "Cache-Control": "max-age=0",
+            "DNT": "1",
             "Referer": "https://www.ebay.com/",
-            "Cache-Control": "no-cache",
-            "Pragma": "no-cache",
-            "Connection": "keep-alive",
-            "Upgrade-Insecure-Requests": "1",
+            "Sec-Ch-Ua": '"Google Chrome";v="120", "Chromium";v="120", "Not A(Brand)";v="99"',
+            "Sec-Ch-Ua-Mobile": "?0",
+            "Sec-Ch-Ua-Platform": "\"Windows\"",
             "Sec-Fetch-Dest": "document",
             "Sec-Fetch-Mode": "navigate",
             "Sec-Fetch-Site": "same-origin",
             "Sec-Fetch-User": "?1",
-            "sec-ch-ua": '"Google Chrome";v="120", "Chromium";v="120", "Not A(Brand)";v="99"',
-            "sec-ch-ua-mobile": "?0",
-            "sec-ch-ua-platform": "Windows",
+            "Upgrade-Insecure-Requests": "1",
+            "Connection": "keep-alive",
+            "Pragma": "no-cache",
         }
     )
-    try:
-        session.get("https://www.ebay.com/", timeout=12)
-    except Exception:
-        pass
+    
+    # Try warmup with home page and common endpoints to establish session
+    warmup_urls = [
+        "https://www.ebay.com/",
+        "https://www.ebay.com/n/all-categories",
+    ]
+    for warmup_url in warmup_urls:
+        try:
+            session.get(warmup_url, timeout=10)
+            time.sleep(0.5)
+        except Exception:
+            pass
+    
     return session
 
 
@@ -189,6 +204,56 @@ def normalize_url(url):
         return base_url + ("?" + "&".join(params) if params else "")
     except Exception:
         return url
+
+
+def get_seller_name_from_store_url(url):
+    try:
+        parsed = urlparse(url)
+        path = parsed.path.strip("/")
+        if not path:
+            return None
+        path_parts = path.split("/")
+        if len(path_parts) < 2:
+            return None
+        if path_parts[0].lower() in {"str", "usr", "stores"}:
+            return path_parts[1]
+    except Exception:
+        pass
+    return None
+
+
+def build_search_url_for_seller(seller, per_page=200, sort="12"):
+    if not seller:
+        return None
+    seller = quote_plus(_strip_text(seller))
+    return f"https://www.ebay.com/sch/i.html?_nkw=&_saslop=1&_sasl={seller}&_sop={sort}&_ipg={per_page}"
+
+
+def get_search_fallback_urls(store_url):
+    seller = get_seller_name_from_store_url(store_url)
+    if not seller:
+        return []
+    return [
+        build_search_url_for_seller(seller, per_page=200, sort="12"),
+        build_search_url_for_seller(seller, per_page=96, sort="12"),
+        build_search_url_for_seller(seller, per_page=48, sort="12"),
+    ]
+
+
+def find_first_nonblocked_http_url(url, session):
+    candidates = [url]
+    if is_ebay_store_url(url):
+        candidates.extend([u for u in get_search_fallback_urls(url) if u])
+    
+    for candidate in candidates:
+        try:
+            response = session.get(candidate, timeout=20)
+            if response.status_code != 200:
+                continue
+            return candidate
+        except Exception:
+            continue
+    return None
 
 
 def get_driver(use_headless=True):
@@ -280,8 +345,10 @@ def is_blocked_page(html, soup=None):
         "you don't have permission",
         "browser check",
         "security check",
+        "security measure",
         "bot check",
         "please enable cookies",
+        "pardon our interruption",
         "verifying your browser",
     ]
     return any(phrase in text for phrase in blocked_phrases)
@@ -411,51 +478,80 @@ def _extract_links_from_page(driver):
 
 def get_all_product_links_http(store_url, on_progress=None, max_pages=50, session=None):
     """Collect product links using HTTP requests only (no Selenium)"""
-    store_url = normalize_store_url(store_url)
+    original_url = _strip_text(store_url)
+    try:
+        normalized_store_url = normalize_store_url(store_url)
+    except ValueError:
+        normalized_store_url = original_url
+
     all_links = set()
     own_session = False
     if session is None:
         session = create_http_session()
         own_session = True
-    base_url = store_url.split("&_pgn=")[0] if "_pgn=" in store_url else store_url
+
+    active_url = find_first_nonblocked_http_url(normalized_store_url, session)
+    if not active_url:
+        active_url = normalized_store_url
+
+    base_url = active_url.split("&_pgn=")[0] if "_pgn=" in active_url else active_url
     separator = "&" if "?" in base_url else "?"
-    
     no_change_counter = 0
+    last_page_with_links = 0
+
     for page in range(1, max_pages + 1):
         url = f"{base_url}{separator}_pgn={page}"
         try:
             response = session.get(url, timeout=15)
             if response.status_code != 200:
                 break
+            
             soup = BeautifulSoup(response.text, "html.parser")
             page_links = []
+
+            # Try multiple selectors to find product links
+            selectors_to_try = [
+                ("a[href*='/itm/']", None),
+                ("a.s-item__link", None),
+                (".s-item a[href*='/itm/']", None),
+                ("a", "href"),
+            ]
             
-            for link_elem in soup.find_all("a", href=True):
-                href = link_elem.get("href", "")
-                if is_valid_item_link(href):
-                    normalized = normalize_url(href)
-                    if normalized not in all_links:
-                        all_links.add(normalized)
-                        page_links.append(normalized)
-            
+            for selector, attr in selectors_to_try:
+                elements = soup.select(selector) if attr is None else [e for e in soup.find_all(attr) if '/itm/' in str(e)]
+                for elem in elements:
+                    try:
+                        href = elem.get("href", "") if attr is None else str(elem)
+                        if is_valid_item_link(href):
+                            normalized = normalize_url(href)
+                            if normalized not in all_links:
+                                all_links.add(normalized)
+                                page_links.append(normalized)
+                    except Exception:
+                        continue
+                
+                if page_links:
+                    break
+
             if on_progress:
                 on_progress(page, max_pages, len(page_links), len(page_links), len(all_links))
-            
+
             if not page_links:
                 no_change_counter += 1
                 if no_change_counter >= 3:
                     break
             else:
                 no_change_counter = 0
-            
-            time.sleep(1.0)
-        except Exception:
+                last_page_with_links = page
+
+            time.sleep(0.8)
+        except Exception as e:
             break
-    
+
     if own_session:
         session.close()
+    
     return list(all_links)
-
 
 
 def get_all_product_links(store_url, driver, total_products=None, on_progress=None):
@@ -916,16 +1012,103 @@ def is_streamlit_cloud():
 def main():
     st.sidebar.header("🔧 Scraper Settings")
 
+    mode = st.sidebar.radio(
+        "Select scraping mode:",
+        ["Auto (Browser + HTTP)", "Manual Links", "Local Only"],
+        help="Auto: Try browser first, then HTTP. Manual: Paste/upload links. Local: Selenium only (no Cloud)"
+    )
+
     headless = st.sidebar.checkbox(
         "Run Chrome headless",
         value=True,
         help="Browser runs in background (recommended). Uncheck only for debugging.",
     )
 
+    if mode == "Manual Links":
+        st.header("📋 Manual Link Entry")
+        st.markdown("### Paste product links (one per line)")
+        manual_links_text = st.text_area(
+            "Product Links",
+            height=200,
+            placeholder="https://www.ebay.com/itm/123456789\nhttps://www.ebay.com/itm/987654321\n...",
+            label_visibility="collapsed",
+        )
+        
+        if manual_links_text.strip():
+            manual_links = [url.strip() for url in manual_links_text.split('\n') if url.strip()]
+            manual_links = [url for url in manual_links if 'ebay.com' in url.lower() and '/itm/' in url.lower()]
+            st.success(f"✅ Parsed {len(manual_links)} links")
+            
+            if st.button("🚀 Start Scraping", type="primary", disabled=not manual_links):
+                with st.spinner("🔄 Scraping products... This may take a few minutes"):
+                    http_session = create_http_session()
+                    scrape_progress = st.progress(0, text="Starting product scraping...")
+                    scraped_data = _scrape_all_products_ui(
+                        manual_links,
+                        scrape_progress,
+                        selenium_driver=None,
+                        use_headless=headless,
+                        session=http_session,
+                    )
+                    st.success(f"📦 Products Scraped: {len(scraped_data):,}")
+
+                st.header("📥 Step 2: Download Results")
+                if scraped_data:
+                    df = pd.DataFrame(scraped_data)
+                    columns_order = [
+                        "title", "price", "description", "part_num_mpn",
+                        "brand", "model", "image", "url",
+                    ]
+                    df = df[columns_order]
+
+                    st.subheader("📋 Sample Data")
+                    st.dataframe(df.head(10))
+
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        st.metric("Total Products", len(df))
+                    with col2:
+                        st.metric("Products with Price", df["price"].astype(bool).sum())
+                    with col3:
+                        st.metric("Products with Images", df["image"].astype(bool).sum())
+
+                    st.subheader("💾 Download Options")
+                    st.download_button(
+                        label="📄 Download CSV",
+                        data=df.to_csv(index=False),
+                        file_name=f"ebay_products_{int(time.time())}.csv",
+                        mime="text/csv",
+                    )
+
+                    if EXCEL_AVAILABLE:
+                        excel_buffer = BytesIO()
+                        with pd.ExcelWriter(excel_buffer, engine="openpyxl") as writer:
+                            df.to_excel(writer, index=False, sheet_name="Products")
+                            worksheet = writer.sheets["Products"]
+                            for column in worksheet.columns:
+                                max_length = 0
+                                column_letter = column[0].column_letter
+                                for cell in column:
+                                    try:
+                                        max_length = max(max_length, len(str(cell.value)))
+                                    except Exception:
+                                        pass
+                                worksheet.column_dimensions[column_letter].width = min(max_length + 2, 50)
+                        excel_buffer.seek(0)
+                        st.download_button(
+                            label="📊 Download Excel",
+                            data=excel_buffer.getvalue(),
+                            file_name=f"ebay_products_{int(time.time())}.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        )
+                else:
+                    st.error("❌ No products were scraped. Please check the links and try again.")
+        return
+
     store_url = st.sidebar.text_input(
         "eBay Store URL",
-        placeholder="https://www.ebay.com/sch/i.html?_nkw=...",
-        help="Enter the eBay store or search URL you want to scrape",
+        placeholder="https://www.ebay.com/str/STORENAME",
+        help="Enter the eBay store URL (works best locally with Selenium)",
     )
 
     if store_url and "ebay.com" not in store_url.lower():
@@ -943,25 +1126,30 @@ def main():
         http_session = None
         on_cloud = is_streamlit_cloud()
 
-        if on_cloud and is_ebay_search_url(store_url) and not is_ebay_store_url(store_url):
+        if on_cloud and mode == "Local Only":
             st.error(
-                "❌ Streamlit Cloud cannot reliably scrape eBay search pages. "
-                "Please enter a store URL like https://www.ebay.com/str/STORENAME or run locally."
+                "❌ 'Local Only' mode requires Selenium and ChromeDriver, which are not available on Streamlit Cloud. "
+                "Please use 'Auto' mode or switch to 'Manual Links'."
             )
             return
-        
+
         if on_cloud:
-            st.info("ℹ️ Running on Streamlit Cloud: Using HTTP-only scraping (no browser automation)")
+            st.warning(
+                "⚠️ **Running on Streamlit Cloud**: HTTP-only scraping mode. "
+                "eBay may block store page requests. If this fails, use 'Manual Links' mode instead."
+            )
             http_session = create_http_session()
-        else:
+        elif mode != "Manual Links":
             with st.spinner("🔄 Initializing scraper..."):
                 try:
                     driver = get_driver(use_headless=headless)
                     st.success("✅ Scraper initialized successfully!")
                 except Exception as e:
-                    st.warning(f"⚠️ Browser automation failed, using HTTP-only mode: {str(e)[:100]}")
+                    if mode == "Local Only":
+                        st.error(f"❌ Browser initialization failed: {str(e)[:100]}")
+                        return
+                    st.warning(f"⚠️ Browser automation unavailable, using HTTP-only mode: {str(e)[:100]}")
                     http_session = create_http_session()
-                    driver = None
 
         st.header("📊 Step 1: Detecting Total Products")
         total_progress = st.progress(0, text="Analyzing store...")
@@ -980,10 +1168,15 @@ def main():
 
         st.header("🔗 Step 2: Collecting Product Links")
         links_progress = st.progress(0, text="Starting link collection...")
+        all_links = []
+        
         if driver:
             all_links = _get_all_product_links_ui(store_url, driver, links_progress, total_products)
             links_progress.progress(1.0, text=f"✅ Found {len(all_links):,} product links")
-            st.success(f"🔗 Product Links Collected: {len(all_links):,}")
+            if all_links:
+                st.success(f"🔗 Product Links Collected: {len(all_links):,}")
+            else:
+                st.warning("⚠️ No links found via browser. This store might be blocked or empty.")
         else:
             st.info("ℹ️ Collecting links via HTTP (no browser)...")
             if http_session is None:
@@ -1000,18 +1193,37 @@ def main():
                 max_pages=100,
                 session=http_session,
             )
-            links_progress.progress(1.0, text=f"✅ Found {len(all_links):,} product links")
+            links_progress.progress(1.0, text=f"Found {len(all_links):,} product links")
             if all_links:
                 st.success(f"🔗 Product Links Collected: {len(all_links):,}")
             else:
-                st.warning("⚠️ No links found via HTTP. The store URL may not be valid or blocking requests.")
+                st.error(
+                    "❌ **eBay blocked link collection via HTTP.** This is an eBay anti-bot protection. "
+                    "\n\n**Solutions:**\n"
+                    "1. **Run locally** with a real browser (Selenium)\n"
+                    "2. **Use Manual Mode** - paste product links directly\n"
+                    "3. **Try a different store URL**"
+                )
+                if driver:
+                    driver.quit()
+                if http_session:
+                    try:
+                        http_session.close()
+                    except Exception:
+                        pass
+                return
 
         st.header("📦 Step 3: Scraping Product Details")
-        
+
         if not all_links:
             st.error("❌ No product links found. Please check the store URL and try again.")
             if driver:
                 driver.quit()
+            if http_session:
+                try:
+                    http_session.close()
+                except Exception:
+                    pass
             return
 
         with st.spinner("🔄 Scraping products... This may take a few minutes"):
@@ -1091,21 +1303,29 @@ def main():
 
     with st.sidebar.expander("📖 Instructions"):
         st.markdown("""
-        1. **Enter eBay Store URL**: Paste any eBay store or search URL
-        2. **Click Start Scraping**: The scraper will:
-           - Detect total product count
-           - Collect all product links (all pages)
-           - Scrape detailed product information (headless)
-        3. **Download Results**: Get data in CSV or Excel format
-
-        **Data Fields:** Title, Price, Description, MPN, Brand, Model, Image, URL
+        ### Three Modes Available:
+        
+        **1. Auto Mode** (Best for stores)
+        - Automatically tries browser + HTTP scraping
+        - Works best when run locally
+        - Requires Selenium for best results
+        
+        **2. Manual Links** (Always works)
+        - Paste or upload product links directly
+        - Use this when automatic scraping is blocked
+        - No store detection needed
+        
+        **3. Local Only** (Selenium required)
+        - Forces browser-based scraping only
+        - Not available on Streamlit Cloud
+        - Most reliable for anti-bot protection
         """)
 
     with st.sidebar.expander("🔗 Sample URLs"):
         st.code("""
-https://www.ebay.com/sch/i.html?_nkw=iphone
-https://www.ebay.com/sch/i.html?_ssn=apple
-https://www.ebay.com/sch/i.html?_in_kw=1&_ipg=240&_sop=12
+https://www.ebay.com/str/prolinefix
+https://www.ebay.com/str/mystore
+https://www.ebay.com/itm/123456789
         """)
 
 
