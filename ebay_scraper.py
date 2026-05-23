@@ -387,6 +387,46 @@ def _extract_links_from_page(driver):
     return links
 
 
+def get_all_product_links_http(store_url, on_progress=None, max_pages=10):
+    """Collect product links using HTTP requests only (no Selenium)"""
+    store_url = normalize_store_url(store_url)
+    all_links = set()
+    session = create_http_session()
+    base_url = store_url.split("&_pgn=")[0] if "_pgn=" in store_url else store_url
+    separator = "&" if "?" in base_url else "?"
+    
+    for page in range(1, max_pages + 1):
+        url = f"{base_url}{separator}_pgn={page}"
+        try:
+            response = session.get(url, timeout=15)
+            if response.status_code != 200:
+                break
+            soup = BeautifulSoup(response.text, "html.parser")
+            page_links = []
+            
+            for link_elem in soup.find_all("a", href=True):
+                href = link_elem.get("href", "")
+                if is_valid_item_link(href):
+                    item_id = extract_item_id(href)
+                    if item_id and item_id not in {extract_item_id(l) for l in all_links}:
+                        normalized = normalize_url(href)
+                        all_links.add(normalized)
+                        page_links.append(normalized)
+            
+            if on_progress:
+                on_progress(page, max_pages, len(page_links), len(page_links), len(all_links))
+            
+            if not page_links:
+                break
+            
+            time.sleep(1.0)
+        except Exception:
+            break
+    
+    session.close()
+    return list(all_links)
+
+
 def get_all_product_links(store_url, driver, total_products=None, on_progress=None):
     store_url = normalize_store_url(store_url)
     all_links = set()
@@ -887,26 +927,27 @@ def main():
         links_progress = st.progress(0, text="Starting link collection...")
         if driver:
             all_links = _get_all_product_links_ui(store_url, driver, links_progress, total_products)
-        else:
-            st.warning("⚠️ Cannot collect links without browser. Using HTTP requests to scrape products directly (slower).")
-            all_links = []
-
-        st.header("📦 Step 3: Scraping Product Details")
-        
-        if all_links:
             links_progress.progress(1.0, text=f"✅ Found {len(all_links):,} product links")
             st.success(f"🔗 Product Links Collected: {len(all_links):,}")
         else:
-            if driver:
-                st.error("❌ No product links found to scrape!")
-                driver.quit()
-                return
+            st.info("ℹ️ Collecting links via HTTP (no browser)...")
+            def on_http_progress(page, max_pages, found, new_items, total_links):
+                progress_ratio = min(page / max(max_pages, 1), 1.0)
+                links_progress.progress(
+                    progress_ratio,
+                    text=f"Page {page}/{max_pages}: Found {found} links, Total: {total_links}"
+                )
+            all_links = get_all_product_links_http(store_url, on_progress=on_http_progress, max_pages=10)
+            links_progress.progress(1.0, text=f"✅ Found {len(all_links):,} product links")
+            if all_links:
+                st.success(f"🔗 Product Links Collected: {len(all_links):,}")
             else:
-                st.info("ℹ️ Proceeding with direct HTTP scraping (may get fewer results)")
-                all_links = []
+                st.warning("⚠️ No links found via HTTP. The store URL may not be valid or blocking requests.")
 
+        st.header("📦 Step 3: Scraping Product Details")
+        
         if not all_links:
-            st.error("❌ No product links found to scrape!")
+            st.error("❌ No product links found. Please check the store URL and try again.")
             if driver:
                 driver.quit()
             return
