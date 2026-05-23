@@ -275,29 +275,38 @@ def is_blocked_page(html, soup=None):
 
 
 def is_valid_product_page(html, url=None, soup=None):
-    if not html or len(html) < 500:
+    if not html or len(html) < 300:
         return False
     if soup is None:
         soup = BeautifulSoup(html, "html.parser")
     if is_blocked_page(html, soup=soup):
         return False
-    title_candidate = (
+    
+    # Check for any product indicator: title, price, image, or structured data
+    has_title = (
         _pick_text(soup, ["meta[property='og:title']", "meta[name='twitter:title']"], attr="content")
-        or _pick_text(soup, ["h1#itemTitle", "h1[itemprop='name']", "h1"])
-        or _pick_text(soup, ["[data-testid='title']", ".it-ttl", "div.it-ttl"])
+        or _pick_text(soup, ["h1#itemTitle", "h1[itemprop='name']", ".it-ttl"])
     )
-    if title_candidate:
-        title_text = clean_title(title_candidate)
-        if len(title_text) > 5:
-            return True
-    for script in soup.find_all("script", {"type": "application/ld+json"}):
-        try:
-            payload = json.loads(script.string or "{}")
-            if isinstance(payload, dict) and payload.get("@type") == "Product":
-                return True
-        except Exception:
-            continue
-    return False
+    
+    has_price = _pick_text(
+        soup,
+        ["meta[property='product:price:amount']", "span#prcIsum", ".x-price-primary", "span.s-item__price"],
+    )
+    
+    has_image = _pick_text(
+        soup,
+        ["meta[property='og:image']", "img#icImg"],
+        attr="src" if "img" in str(soup.select_one("img#icImg")) else "content"
+    )
+    
+    has_json_ld = any(
+        "Product" in (json.loads(script.string or "{}").get("@type", ""))
+        for script in soup.find_all("script", {"type": "application/ld+json"})
+        if script.string
+    )
+    
+    # Page is valid if it has title OR (price + image) OR JSON-LD Product
+    return bool(has_title or (has_price and has_image) or has_json_ld)
 
 
 def get_total_products(url, driver):
@@ -387,7 +396,7 @@ def _extract_links_from_page(driver):
     return links
 
 
-def get_all_product_links_http(store_url, on_progress=None, max_pages=10):
+def get_all_product_links_http(store_url, on_progress=None, max_pages=50):
     """Collect product links using HTTP requests only (no Selenium)"""
     store_url = normalize_store_url(store_url)
     all_links = set()
@@ -395,6 +404,7 @@ def get_all_product_links_http(store_url, on_progress=None, max_pages=10):
     base_url = store_url.split("&_pgn=")[0] if "_pgn=" in store_url else store_url
     separator = "&" if "?" in base_url else "?"
     
+    no_change_counter = 0
     for page in range(1, max_pages + 1):
         url = f"{base_url}{separator}_pgn={page}"
         try:
@@ -407,9 +417,8 @@ def get_all_product_links_http(store_url, on_progress=None, max_pages=10):
             for link_elem in soup.find_all("a", href=True):
                 href = link_elem.get("href", "")
                 if is_valid_item_link(href):
-                    item_id = extract_item_id(href)
-                    if item_id and item_id not in {extract_item_id(l) for l in all_links}:
-                        normalized = normalize_url(href)
+                    normalized = normalize_url(href)
+                    if normalized not in all_links:
                         all_links.add(normalized)
                         page_links.append(normalized)
             
@@ -417,7 +426,11 @@ def get_all_product_links_http(store_url, on_progress=None, max_pages=10):
                 on_progress(page, max_pages, len(page_links), len(page_links), len(all_links))
             
             if not page_links:
-                break
+                no_change_counter += 1
+                if no_change_counter >= 3:
+                    break
+            else:
+                no_change_counter = 0
             
             time.sleep(1.0)
         except Exception:
@@ -425,6 +438,7 @@ def get_all_product_links_http(store_url, on_progress=None, max_pages=10):
     
     session.close()
     return list(all_links)
+
 
 
 def get_all_product_links(store_url, driver, total_products=None, on_progress=None):
@@ -598,13 +612,13 @@ def _extract_product_data(html, soup, url):
 
     data["title"] = clean_title(
         _pick_text(soup, ["meta[property='og:title']", "meta[name='twitter:title']"], attr="content")
-        or _pick_text(soup, ["h1#itemTitle", "h1[itemprop='name']", "h1"])
-        or _pick_text(soup, ["[data-testid='title']", ".it-ttl", "div.it-ttl"])
+        or _pick_text(soup, ["h1#itemTitle", "h1[itemprop='name']", ".it-ttl"])
+        or _pick_text(soup, ["h1"])
     )
     if not data["title"]:
         for h1 in soup.find_all("h1"):
             text = clean_title(h1.get_text(" ", strip=True))
-            if text and len(text) > 5 and text.lower() not in ["ebay", "shop", "save", "sign in"]:
+            if text and len(text) > 3 and text.lower() not in ["ebay", "shop", "save", "sign in"]:
                 data["title"] = text
                 break
 
@@ -622,6 +636,7 @@ def _extract_product_data(html, soup, url):
                 ".x-price-primary",
                 "span.s-item__price",
                 "*[itemprop='price']",
+                "span.BOLD",
             ],
         )
     )
@@ -632,9 +647,13 @@ def _extract_product_data(html, soup, url):
         attr="content",
     )
     if not data["image"]:
-        img_elem = soup.select_one("img#icImg") or soup.select_one(".ux-image-carousel-item img")
-        if img_elem:
-            data["image"] = clean_text(img_elem.get("src", "") or img_elem.get("data-src", ""))
+        for img_sel in ["img#icImg", ".ux-image-carousel-item img", "img.s-item__img", "img[alt*='product']"]:
+            img_elem = soup.select_one(img_sel)
+            if img_elem:
+                src = img_elem.get("src", "") or img_elem.get("data-src", "")
+                if src:
+                    data["image"] = clean_text(src)
+                    break
 
     data["description"] = _pick_text(
         soup,
@@ -649,9 +668,9 @@ def _extract_product_data(html, soup, url):
     _fill_from_json_ld(soup, data)
 
     if not data["price"]:
-        m = re.search(r"\$\s*([0-9,]+(?:\.[0-9]{2})?)", html)
-        if m:
-            data["price"] = clean_price(m.group(0))
+        for match in re.finditer(r"\$\s*([0-9,]+(?:\.[0-9]{2})?)", html):
+            data["price"] = clean_price(match.group(0))
+            break
 
     for key in data:
         if isinstance(data[key], str):
@@ -659,7 +678,8 @@ def _extract_product_data(html, soup, url):
             if len(data[key]) > 500:
                 data[key] = data[key][:500]
 
-    if data["title"] and not is_blocked_page(html, soup=soup):
+    # Accept page if it has a title, regardless of other fields
+    if data["title"] and len(data["title"]) > 3 and not is_blocked_page(html, soup=soup):
         return data
     return None
 
@@ -686,46 +706,49 @@ def _scrape_product_with_selenium(url, driver, debug=False):
 
 def scrape_product(url, session=None, selenium_driver=None, selenium_lock=None, debug=False):
     url = normalize_url(url)
-    max_retries = 3
+    max_retries = 5
 
     for attempt in range(max_retries):
         try:
             if session is None:
                 session = create_http_session()
-            response = session.get(url, timeout=25)
-            if debug:
+            response = session.get(url, timeout=20)
+            if debug and attempt == 0:
                 print(f"[DEBUG] URL: {url} | Status: {response.status_code}")
             if response.status_code != 200:
                 if attempt < max_retries - 1:
-                    time.sleep(3 + (attempt * 2))
+                    time.sleep(2 + (attempt * 1.5))
                     continue
                 return None
             html = response.text
             soup = BeautifulSoup(html, "html.parser")
-            if is_blocked_page(html, soup=soup) or not is_valid_product_page(html, url=url, soup=soup):
-                if debug:
-                    print(f"[DEBUG] HTTP blocked/invalid page for {url}")
+            if is_blocked_page(html, soup=soup):
+                # Retry blocked pages a few more times
+                if attempt < max_retries - 2:
+                    time.sleep(3 + (attempt * 2))
+                    continue
+                # Fall back to Selenium if available
                 if selenium_driver is not None:
                     if selenium_lock is not None:
                         with selenium_lock:
                             return _scrape_product_with_selenium(url, selenium_driver, debug=debug)
                     return _scrape_product_with_selenium(url, selenium_driver, debug=debug)
-                if attempt < max_retries - 1:
-                    time.sleep(3 + (attempt * 2))
-                    continue
                 return None
+            
+            # Try to extract data even if page validation is loose
             data = _extract_product_data(html, soup, url)
             if data:
                 return data
+            
             if attempt < max_retries - 1:
-                time.sleep(3 + (attempt * 2))
+                time.sleep(1 + (attempt * 1))
                 continue
             return None
         except Exception as e:
-            if debug:
+            if debug and attempt == 0:
                 print(f"[DEBUG] scrape_product exception for {url}: {e}")
             if attempt < max_retries - 1:
-                time.sleep(3 + (attempt * 2))
+                time.sleep(2 + (attempt * 1.5))
                 continue
             return None
     return None
@@ -739,8 +762,8 @@ def scrape_all_products(urls, selenium_driver=None, use_headless=True, max_worke
     total = len(urls)
     progress = {"done": 0, "scraped": 0}
     progress_lock = threading.Lock()
-    batch_size = 8
-    max_workers_actual = 4
+    batch_size = 16
+    max_workers_actual = 8
 
     def report():
         if on_progress:
@@ -750,14 +773,14 @@ def scrape_all_products(urls, selenium_driver=None, use_headless=True, max_worke
     selenium_lock = threading.Lock()
 
     def scrape_request(index, url):
-        delay = (index % max_workers_actual) * 1.2
+        delay = (index % max_workers_actual) * 0.5
         time.sleep(delay)
         return url, scrape_product(
             url,
             session=session,
             selenium_driver=selenium_driver,
             selenium_lock=selenium_lock,
-            debug=(index < 3),
+            debug=False,
         )
 
     for batch_start in range(0, len(urls), batch_size):
@@ -780,10 +803,9 @@ def scrape_all_products(urls, selenium_driver=None, use_headless=True, max_worke
                 except Exception as e:
                     with progress_lock:
                         progress["done"] += 1
-                        print(f"[ERROR] Exception in scrape_request: {e}")
                         report()
         if batch_end < len(urls):
-            time.sleep(3)
+            time.sleep(1.5)
     return all_data
 
 st.set_page_config(
@@ -935,9 +957,9 @@ def main():
                 progress_ratio = min(page / max(max_pages, 1), 1.0)
                 links_progress.progress(
                     progress_ratio,
-                    text=f"Page {page}/{max_pages}: Found {found} links, Total: {total_links}"
+                    text=f"Page {page}: Collected {total_links} unique links"
                 )
-            all_links = get_all_product_links_http(store_url, on_progress=on_http_progress, max_pages=10)
+            all_links = get_all_product_links_http(store_url, on_progress=on_http_progress, max_pages=100)
             links_progress.progress(1.0, text=f"✅ Found {len(all_links):,} product links")
             if all_links:
                 st.success(f"🔗 Product Links Collected: {len(all_links):,}")
