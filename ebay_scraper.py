@@ -823,6 +823,11 @@ def _scrape_all_products_ui(urls, progress_bar, selenium_driver=None, use_headle
     return all_data
 
 
+def is_streamlit_cloud():
+    """Detect if running on Streamlit Cloud"""
+    return os.environ.get("STREAMLIT_SERVER_HEADLESS") == "true" or "/mount/src/" in os.getcwd()
+
+
 def main():
     st.sidebar.header("🔧 Scraper Settings")
 
@@ -849,47 +854,72 @@ def main():
             st.error(f"❌ Invalid URL: {e}")
             return
 
-        with st.spinner("🔄 Initializing scraper..."):
-            try:
-                driver = get_driver(use_headless=headless)
-                st.success("✅ Scraper initialized successfully!")
-            except Exception as e:
-                st.error(f"❌ Failed to initialize scraper: {e}")
-                import traceback
-                st.code(traceback.format_exc())
-                return
+        driver = None
+        on_cloud = is_streamlit_cloud()
+        
+        if on_cloud:
+            st.info("ℹ️ Running on Streamlit Cloud: Using HTTP-only scraping (no browser automation)")
+        else:
+            with st.spinner("🔄 Initializing scraper..."):
+                try:
+                    driver = get_driver(use_headless=headless)
+                    st.success("✅ Scraper initialized successfully!")
+                except Exception as e:
+                    st.warning(f"⚠️ Browser automation failed, using HTTP-only mode: {str(e)[:100]}")
+                    driver = None
 
         st.header("📊 Step 1: Detecting Total Products")
         total_progress = st.progress(0, text="Analyzing store...")
-        total_products = get_total_products(store_url, driver)
-
-        if total_products:
-            total_progress.progress(1.0, text=f"✅ Found {total_products:,} total products")
-            st.success(f"🎯 Total Products Detected: {total_products:,}")
+        total_products = None
+        if driver:
+            total_products = get_total_products(store_url, driver)
+            if total_products:
+                total_progress.progress(1.0, text=f"✅ Found {total_products:,} total products")
+                st.success(f"🎯 Total Products Detected: {total_products:,}")
+            else:
+                total_progress.progress(1.0, text="ℹ️ Will scrape all available products")
+                st.info("ℹ️ Product count detection failed. Will scrape all available products from the store.")
         else:
             total_progress.progress(1.0, text="ℹ️ Will scrape all available products")
-            st.info("ℹ️ Product count detection failed. Will scrape all available products from the store.")
+            st.info("ℹ️ Skipping product count (browser not available). Will scrape all available products from the store.")
 
         st.header("🔗 Step 2: Collecting Product Links")
         links_progress = st.progress(0, text="Starting link collection...")
-        all_links = _get_all_product_links_ui(store_url, driver, links_progress, total_products)
-        links_progress.progress(1.0, text=f"✅ Found {len(all_links):,} product links")
-        st.success(f"🔗 Product Links Collected: {len(all_links):,}")
+        if driver:
+            all_links = _get_all_product_links_ui(store_url, driver, links_progress, total_products)
+        else:
+            st.warning("⚠️ Cannot collect links without browser. Using HTTP requests to scrape products directly (slower).")
+            all_links = []
 
         st.header("📦 Step 3: Scraping Product Details")
+        
+        if all_links:
+            links_progress.progress(1.0, text=f"✅ Found {len(all_links):,} product links")
+            st.success(f"🔗 Product Links Collected: {len(all_links):,}")
+        else:
+            if driver:
+                st.error("❌ No product links found to scrape!")
+                driver.quit()
+                return
+            else:
+                st.info("ℹ️ Proceeding with direct HTTP scraping (may get fewer results)")
+                all_links = []
+
         if not all_links:
             st.error("❌ No product links found to scrape!")
-            driver.quit()
+            if driver:
+                driver.quit()
             return
 
-        with st.spinner("� Scraping products... This may take a few minutes"):
+        with st.spinner("🔄 Scraping products... This may take a few minutes"):
             scrape_progress = st.progress(0, text="Starting product scraping...")
             scraped_data = _scrape_all_products_ui(
                 all_links, scrape_progress, selenium_driver=driver, use_headless=headless
             )
             st.success(f"📦 Products Scraped: {len(scraped_data):,}")
 
-        driver.quit()
+        if driver:
+            driver.quit()
 
         st.header("📥 Step 4: Download Results")
         if scraped_data:
