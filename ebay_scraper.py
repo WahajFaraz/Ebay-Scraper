@@ -60,6 +60,19 @@ def normalize_store_url(url):
     return url
 
 
+def is_ebay_store_url(url):
+    parsed = urlparse(url)
+    path = parsed.path.lower()
+    return "/str/" in path or "/usr/" in path or "/store/" in path or path.startswith("/b/")
+
+
+def is_ebay_search_url(url):
+    parsed = urlparse(url)
+    path = parsed.path.lower()
+    query = parsed.query.lower()
+    return "/sch/" in path or path.endswith("/i.html") or "_nkw=" in query or "/search" in path
+
+
 def _pick_text(soup, selectors, attr=None):
     for selector in selectors:
         try:
@@ -396,11 +409,14 @@ def _extract_links_from_page(driver):
     return links
 
 
-def get_all_product_links_http(store_url, on_progress=None, max_pages=50):
+def get_all_product_links_http(store_url, on_progress=None, max_pages=50, session=None):
     """Collect product links using HTTP requests only (no Selenium)"""
     store_url = normalize_store_url(store_url)
     all_links = set()
-    session = create_http_session()
+    own_session = False
+    if session is None:
+        session = create_http_session()
+        own_session = True
     base_url = store_url.split("&_pgn=")[0] if "_pgn=" in store_url else store_url
     separator = "&" if "?" in base_url else "?"
     
@@ -436,7 +452,8 @@ def get_all_product_links_http(store_url, on_progress=None, max_pages=50):
         except Exception:
             break
     
-    session.close()
+    if own_session:
+        session.close()
     return list(all_links)
 
 
@@ -754,7 +771,7 @@ def scrape_product(url, session=None, selenium_driver=None, selenium_lock=None, 
     return None
 
 
-def scrape_all_products(urls, selenium_driver=None, use_headless=True, max_workers=12, on_progress=None):
+def scrape_all_products(urls, selenium_driver=None, use_headless=True, max_workers=12, on_progress=None, session=None):
     if not urls:
         return []
     all_data = []
@@ -769,7 +786,10 @@ def scrape_all_products(urls, selenium_driver=None, use_headless=True, max_worke
         if on_progress:
             on_progress(progress["done"], total, progress["scraped"])
 
-    session = create_http_session()
+    own_session = False
+    if session is None:
+        session = create_http_session()
+        own_session = True
     selenium_lock = threading.Lock()
 
     def scrape_request(index, url):
@@ -806,6 +826,8 @@ def scrape_all_products(urls, selenium_driver=None, use_headless=True, max_worke
                         report()
         if batch_end < len(urls):
             time.sleep(1.5)
+    if own_session:
+        session.close()
     return all_data
 
 st.set_page_config(
@@ -835,7 +857,7 @@ def _get_all_product_links_ui(store_url, driver, progress_bar, total_products=No
     )
 
 
-def _scrape_all_products_ui(urls, progress_bar, selenium_driver=None, use_headless=True):
+def _scrape_all_products_ui(urls, progress_bar, selenium_driver=None, use_headless=True, session=None):
     status_placeholder = st.empty()
     batch_size = 50
     total_batches = (len(urls) + batch_size - 1) // batch_size
@@ -860,6 +882,7 @@ def _scrape_all_products_ui(urls, progress_bar, selenium_driver=None, use_headle
         use_headless=use_headless,
         max_workers=12,
         on_progress=on_progress,
+        session=session,
     )
 
     progress_bar.progress(1.0, text=f"✅ Completed! Scraped {len(all_data)} products")
@@ -917,10 +940,19 @@ def main():
             return
 
         driver = None
+        http_session = None
         on_cloud = is_streamlit_cloud()
+
+        if on_cloud and is_ebay_search_url(store_url) and not is_ebay_store_url(store_url):
+            st.error(
+                "❌ Streamlit Cloud cannot reliably scrape eBay search pages. "
+                "Please enter a store URL like https://www.ebay.com/str/STORENAME or run locally."
+            )
+            return
         
         if on_cloud:
             st.info("ℹ️ Running on Streamlit Cloud: Using HTTP-only scraping (no browser automation)")
+            http_session = create_http_session()
         else:
             with st.spinner("🔄 Initializing scraper..."):
                 try:
@@ -928,6 +960,7 @@ def main():
                     st.success("✅ Scraper initialized successfully!")
                 except Exception as e:
                     st.warning(f"⚠️ Browser automation failed, using HTTP-only mode: {str(e)[:100]}")
+                    http_session = create_http_session()
                     driver = None
 
         st.header("📊 Step 1: Detecting Total Products")
@@ -953,13 +986,20 @@ def main():
             st.success(f"🔗 Product Links Collected: {len(all_links):,}")
         else:
             st.info("ℹ️ Collecting links via HTTP (no browser)...")
+            if http_session is None:
+                http_session = create_http_session()
             def on_http_progress(page, max_pages, found, new_items, total_links):
                 progress_ratio = min(page / max(max_pages, 1), 1.0)
                 links_progress.progress(
                     progress_ratio,
                     text=f"Page {page}: Collected {total_links} unique links"
                 )
-            all_links = get_all_product_links_http(store_url, on_progress=on_http_progress, max_pages=100)
+            all_links = get_all_product_links_http(
+                store_url,
+                on_progress=on_http_progress,
+                max_pages=100,
+                session=http_session,
+            )
             links_progress.progress(1.0, text=f"✅ Found {len(all_links):,} product links")
             if all_links:
                 st.success(f"🔗 Product Links Collected: {len(all_links):,}")
@@ -977,12 +1017,21 @@ def main():
         with st.spinner("🔄 Scraping products... This may take a few minutes"):
             scrape_progress = st.progress(0, text="Starting product scraping...")
             scraped_data = _scrape_all_products_ui(
-                all_links, scrape_progress, selenium_driver=driver, use_headless=headless
+                all_links,
+                scrape_progress,
+                selenium_driver=driver,
+                use_headless=headless,
+                session=http_session,
             )
             st.success(f"📦 Products Scraped: {len(scraped_data):,}")
 
         if driver:
             driver.quit()
+        if http_session is not None:
+            try:
+                http_session.close()
+            except Exception:
+                pass
 
         st.header("📥 Step 4: Download Results")
         if scraped_data:
