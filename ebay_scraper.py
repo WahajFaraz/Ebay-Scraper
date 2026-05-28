@@ -10,7 +10,7 @@ import pandas as pd
 from io import BytesIO
 from bs4 import BeautifulSoup
 from urllib.parse import urlparse, parse_qs, quote_plus
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, wait
 
 try:
     from selenium import webdriver
@@ -1057,14 +1057,15 @@ def scrape_product(url, session=None, selenium_driver=None, selenium_lock=None, 
             session.close()
 
 
-def scrape_all_products(urls, selenium_driver=None, use_headless=True, max_workers=50, on_progress=None, session=None):
+def scrape_all_products(urls, selenium_driver=None, use_headless=True, max_workers=50, on_progress=None, session=None, timeout=840):
     if not urls:
         return []
     all_data = []
     seen_items = set()
     total = len(urls)
-    progress = {"done": 0, "scraped": 0}
+    progress = {"done": 0, "scraped": 0, "last_report": 0}
     progress_lock = threading.Lock()
+    start_time = time.time()
 
     def report():
         if on_progress:
@@ -1090,22 +1091,40 @@ def scrape_all_products(urls, selenium_driver=None, use_headless=True, max_worke
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {executor.submit(scrape_request, url): url for url in urls}
-        for future in as_completed(futures):
-            try:
-                url, data = future.result()
-                item_id = extract_item_id(url)
-                with progress_lock:
-                    progress["done"] += 1
-                    if data and data.get("title"):
-                        if item_id and item_id not in seen_items:
-                            seen_items.add(item_id)
-                            all_data.append(data)
-                            progress["scraped"] += 1
-                    report()
-            except Exception:
-                with progress_lock:
-                    progress["done"] += 1
-                    report()
+        pending = set(futures.keys())
+        while pending:
+            elapsed = time.time() - start_time
+            remaining = max(timeout - elapsed, 0)
+            done, pending = wait(pending, timeout=min(remaining, 5))
+            for future in done:
+                try:
+                    url, data = future.result()
+                    item_id = extract_item_id(url)
+                    with progress_lock:
+                        progress["done"] += 1
+                        if data and data.get("title"):
+                            if item_id and item_id not in seen_items:
+                                seen_items.add(item_id)
+                                all_data.append(data)
+                                progress["scraped"] += 1
+                        progress["last_report"] += 1
+                        if progress["last_report"] >= 5 or progress["done"] == total:
+                            progress["last_report"] = 0
+                            report()
+                except Exception:
+                    with progress_lock:
+                        progress["done"] += 1
+                        progress["last_report"] += 1
+                        if progress["last_report"] >= 5 or progress["done"] == total:
+                            progress["last_report"] = 0
+                            report()
+            if elapsed >= timeout:
+                for f in pending:
+                    f.cancel()
+                break
+    if elapsed >= timeout:
+        if on_progress:
+            on_progress(progress["done"], total, progress["scraped"])
     return all_data
 
 st.set_page_config(
@@ -1135,18 +1154,22 @@ def _get_all_product_links_ui(store_url, driver, progress_bar, total_products=No
     )
 
 
-def _scrape_all_products_ui(urls, progress_bar, selenium_driver=None, use_headless=True, session=None):
+def _scrape_all_products_ui(urls, progress_bar, selenium_driver=None, use_headless=True, session=None, timeout=840):
     status_placeholder = st.empty()
-    report_interval = max(len(urls) // 100, 1)
     _t0 = time.time()
+    _last_report_time = [0.0]
 
     def on_progress(done, total, scraped_count):
-        if done % report_interval != 0 and done != total:
+        now = time.time()
+        if done > 0 and done < total and done % 10 != 0 and (now - _last_report_time[0]) < 3:
             return
-        elapsed = time.time() - _t0
+        _last_report_time[0] = now
+        elapsed = now - _t0
         speed = int(done / max(elapsed, 1))
+        eta_sec = int((total - done) / max(speed, 1))
         progress_ratio = min(done / max(total, 1), 1.0)
         pct = int(progress_ratio * 100)
+        eta_str = f"{eta_sec//60}m {eta_sec%60}s" if eta_sec < 3600 else f"{eta_sec//3600}h {(eta_sec%3600)//60}m"
         progress_bar.progress(
             progress_ratio,
             text=f"Scraping... {scraped_count}/{total} products ({pct}%)"
@@ -1154,7 +1177,7 @@ def _scrape_all_products_ui(urls, progress_bar, selenium_driver=None, use_headle
         status_placeholder.markdown(
             f"**Processed:** {min(done, total)} / {total}  \n"
             f"**Saved:** {scraped_count}  \n"
-            f"**Speed:** {speed}/sec"
+            f"**Speed:** {speed}/sec • **ETA:** {eta_str}"
         )
 
     all_data = scrape_all_products(
@@ -1164,6 +1187,7 @@ def _scrape_all_products_ui(urls, progress_bar, selenium_driver=None, use_headle
         max_workers=50,
         on_progress=on_progress,
         session=session,
+        timeout=timeout,
     )
 
     progress_bar.progress(1.0, text=f"✅ Completed! Scraped {len(all_data)} products")
@@ -1246,14 +1270,19 @@ def main():
                 with st.spinner("🔄 Scraping products... This may take a few minutes"):
                     http_session = create_http_session()
                     scrape_progress = st.progress(0, text="Starting product scraping...")
-                    scraped_data = _scrape_all_products_ui(
-                        manual_links,
-                        scrape_progress,
-                        selenium_driver=None,
-                        use_headless=headless,
-                        session=http_session,
-                    )
-                    st.success(f"📦 Products Scraped: {len(scraped_data):,}")
+                    scraped_data = []
+                    try:
+                        scraped_data = _scrape_all_products_ui(
+                            manual_links,
+                            scrape_progress,
+                            selenium_driver=None,
+                            use_headless=headless,
+                            session=http_session,
+                        )
+                    except Exception as e:
+                        st.warning(f"⚠️ Scraping interrupted: {str(e)[:100]}")
+                    if scraped_data:
+                        st.success(f"📦 Products Scraped: {len(scraped_data):,}")
 
                 st.header("📥 Step 2: Download Results")
                 if scraped_data:
@@ -1429,14 +1458,23 @@ def main():
 
         with st.spinner("🔄 Scraping products... This may take a few minutes"):
             scrape_progress = st.progress(0, text="Starting product scraping...")
-            scraped_data = _scrape_all_products_ui(
-                all_links,
-                scrape_progress,
-                selenium_driver=driver,
-                use_headless=headless,
-                session=http_session,
-            )
-            st.success(f"📦 Products Scraped: {len(scraped_data):,}")
+            scraped_data = []
+            time_limit_warning = False
+            try:
+                scraped_data = _scrape_all_products_ui(
+                    all_links,
+                    scrape_progress,
+                    selenium_driver=driver,
+                    use_headless=headless,
+                    session=http_session,
+                )
+            except Exception as e:
+                st.warning(f"⚠️ Scraping interrupted: {str(e)[:100]}")
+                time_limit_warning = True
+            if scraped_data:
+                st.success(f"📦 Products Scraped: {len(scraped_data):,}")
+            if time_limit_warning and scraped_data:
+                st.info(f"⏱️ Scraping hit time limit — saved {len(scraped_data)} products so far. Try with fewer products for complete results.")
 
         if driver:
             driver.quit()
