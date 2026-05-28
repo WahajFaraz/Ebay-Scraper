@@ -12,13 +12,24 @@ from bs4 import BeautifulSoup
 from urllib.parse import urlparse, parse_qs, quote_plus
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from selenium import webdriver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException
+try:
+    from selenium import webdriver
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.chrome.options import Options
+    from selenium.webdriver.chrome.service import Service
+    from selenium.webdriver.support.ui import WebDriverWait
+    from selenium.webdriver.support import expected_conditions as EC
+    from selenium.common.exceptions import TimeoutException
+    SELENIUM_AVAILABLE = True
+except ImportError:
+    webdriver = None
+    By = None
+    Options = None
+    Service = None
+    WebDriverWait = None
+    EC = None
+    TimeoutException = Exception
+    SELENIUM_AVAILABLE = False
 
 try:
     import undetected_chromedriver as uc
@@ -257,11 +268,13 @@ def find_first_nonblocked_http_url(url, session):
 
 
 def get_driver(use_headless=True):
+    if not SELENIUM_AVAILABLE:
+        raise RuntimeError("Selenium is not installed")
     use_uc = UC_AVAILABLE and os.environ.get("USE_UC", "0") == "1"
     chrome_options = uc.ChromeOptions() if use_uc else Options()
 
     if use_headless:
-        chrome_options.add_argument("--headless=chrome")
+        chrome_options.add_argument("--headless")
     chrome_options.add_argument("--window-size=1920,1080")
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
@@ -274,6 +287,7 @@ def get_driver(use_headless=True):
     chrome_options.add_argument("--disable-background-timer-throttling")
     chrome_options.add_argument("--disable-backgrounding-occluded-windows")
     chrome_options.add_argument("--disable-renderer-backgrounding")
+    chrome_options.add_argument("--remote-debugging-port=0")
     chrome_options.add_argument(f"--user-agent={DEFAULT_USER_AGENT}")
 
     if not use_uc:
@@ -292,6 +306,24 @@ def get_driver(use_headless=True):
         },
     )
 
+    # Streamlit Cloud: locate chrome/chromedriver binaries
+    import shutil
+    chrome_bin = None
+    for candidate in ["/usr/bin/chromium-browser", "/usr/bin/google-chrome", "/usr/bin/chromium"]:
+        if os.path.exists(candidate):
+            chrome_bin = candidate
+            break
+    if chrome_bin:
+        chrome_options.binary_location = chrome_bin
+
+    chromedriver_path = None
+    for candidate in ["/usr/bin/chromedriver", "/usr/lib/chromium-browser/chromedriver"]:
+        if os.path.exists(candidate):
+            chromedriver_path = candidate
+            break
+    if not chromedriver_path:
+        chromedriver_path = shutil.which("chromedriver")
+
     driver = None
     if use_uc:
         try:
@@ -299,7 +331,8 @@ def get_driver(use_headless=True):
         except Exception:
             driver = None
     if driver is None:
-        driver = webdriver.Chrome(service=Service(), options=chrome_options)
+        service = Service(executable_path=chromedriver_path) if chromedriver_path else Service()
+        driver = webdriver.Chrome(service=service, options=chrome_options)
 
     driver.set_page_load_timeout(45)
     driver.set_script_timeout(25)
@@ -416,6 +449,55 @@ def get_total_products(url, driver):
                 total_str = match.group(1).replace(",", "")
                 if total_str.isdigit() and int(total_str) > 0:
                     return int(total_str)
+    except Exception:
+        pass
+    return None
+
+
+def get_total_products_http(store_url, session=None):
+    try:
+        url = normalize_store_url(store_url)
+        own_session = False
+        if session is None:
+            session = create_http_session()
+            own_session = True
+
+        response = session.get(url, timeout=20)
+        if response.status_code != 200:
+            return None
+
+        html = response.text
+        soup = BeautifulSoup(html, "html.parser")
+        text = soup.get_text(" ", strip=True)
+
+        patterns = [
+            (r"of\s+([0-9,]+)\s+results", 1),
+            (r"([0-9,]+)\s+results", 1),
+            (r"of\s+([0-9,]+)\s+items", 1),
+            (r"([0-9,]+)\s+items", 1),
+            (r"of\s+([0-9,]+)\s+listings", 1),
+            (r"([0-9,]+)\s+listings", 1),
+            (r"([0-9,]+)\s+products", 1),
+        ]
+        for pattern, group in patterns:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                total_str = match.group(group).replace(",", "")
+                if total_str.isdigit() and int(total_str) > 0:
+                    return int(total_str)
+
+        # Try from srp-controls
+        count_el = soup.select_one(".srp-controls__count-heading, .rcnt, span.BOLD:first-child")
+        if count_el:
+            count_text = count_el.get_text(" ", strip=True)
+            match = re.search(r"([0-9,]+)", count_text)
+            if match:
+                total_str = match.group(1).replace(",", "")
+                if total_str.isdigit() and int(total_str) > 0:
+                    return int(total_str)
+
+        if own_session:
+            session.close()
     except Exception:
         pass
     return None
@@ -1006,21 +1088,39 @@ def _scrape_all_products_ui(urls, progress_bar, selenium_driver=None, use_headle
 
 def is_streamlit_cloud():
     """Detect if running on Streamlit Cloud"""
-    return os.environ.get("STREAMLIT_SERVER_HEADLESS") == "true" or "/mount/src/" in os.getcwd()
+    cwd = os.getcwd()
+    return (
+        os.environ.get("STREAMLIT_RUNTIME_ENVIRONMENT") == "production"
+        or os.environ.get("STREAMLIT_SERVER_HEADLESS") == "true"
+        or "/mount/src/" in cwd
+        or "/app/" in cwd
+        or os.environ.get("IS_STREAMLIT_CLOUD") == "1"
+    )
 
 
 def main():
     st.sidebar.header("🔧 Scraper Settings")
 
+    on_cloud = is_streamlit_cloud()
+
+    if on_cloud:
+        mode_options = ["Auto (HTTP Only)", "Manual Links"]
+        default_mode = "Auto (HTTP Only)"
+    else:
+        mode_options = ["Auto (Browser + HTTP)", "Manual Links", "Local Only"]
+        default_mode = "Auto (Browser + HTTP)"
+
     mode = st.sidebar.radio(
         "Select scraping mode:",
-        ["Auto (Browser + HTTP)", "Manual Links", "Local Only"],
+        mode_options,
+        index=mode_options.index(default_mode),
         help="Auto: Try browser first, then HTTP. Manual: Paste/upload links. Local: Selenium only (no Cloud)"
     )
 
     headless = st.sidebar.checkbox(
         "Run Chrome headless",
         value=True,
+        disabled=on_cloud,
         help="Browser runs in background (recommended). Uncheck only for debugging.",
     )
 
@@ -1124,19 +1224,11 @@ def main():
 
         driver = None
         http_session = None
-        on_cloud = is_streamlit_cloud()
-
-        if on_cloud and mode == "Local Only":
-            st.error(
-                "❌ 'Local Only' mode requires Selenium and ChromeDriver, which are not available on Streamlit Cloud. "
-                "Please use 'Auto' mode or switch to 'Manual Links'."
-            )
-            return
 
         if on_cloud:
-            st.warning(
-                "⚠️ **Running on Streamlit Cloud**: HTTP-only scraping mode. "
-                "eBay may block store page requests. If this fails, use 'Manual Links' mode instead."
+            st.info(
+                "☁️ **Streamlit Cloud Mode**: Using HTTP-only scraping. "
+                "eBay may block some requests. If scraping fails, switch to 'Manual Links' mode."
             )
             http_session = create_http_session()
         elif mode != "Manual Links":
@@ -1154,17 +1246,20 @@ def main():
         st.header("📊 Step 1: Detecting Total Products")
         total_progress = st.progress(0, text="Analyzing store...")
         total_products = None
+
         if driver:
             total_products = get_total_products(store_url, driver)
-            if total_products:
-                total_progress.progress(1.0, text=f"✅ Found {total_products:,} total products")
-                st.success(f"🎯 Total Products Detected: {total_products:,}")
-            else:
-                total_progress.progress(1.0, text="ℹ️ Will scrape all available products")
-                st.info("ℹ️ Product count detection failed. Will scrape all available products from the store.")
+        elif http_session or not driver:
+            if http_session is None:
+                http_session = create_http_session()
+            total_products = get_total_products_http(store_url, session=http_session)
+
+        if total_products:
+            total_progress.progress(1.0, text=f"✅ Found {total_products:,} total products")
+            st.success(f"🎯 Total Products Detected: {total_products:,}")
         else:
             total_progress.progress(1.0, text="ℹ️ Will scrape all available products")
-            st.info("ℹ️ Skipping product count (browser not available). Will scrape all available products from the store.")
+            st.info("ℹ️ Product count detection failed. Will scrape all available products from the store.")
 
         st.header("🔗 Step 2: Collecting Product Links")
         links_progress = st.progress(0, text="Starting link collection...")
@@ -1302,23 +1397,21 @@ def main():
             st.error("❌ No products were scraped. Please check the store URL and try again.")
 
     with st.sidebar.expander("📖 Instructions"):
-        st.markdown("""
-        ### Three Modes Available:
+        mode_label = "Auto (HTTP Only)" if on_cloud else "Auto (Browser + HTTP)"
+        st.markdown(f"""
+        ### Modes Available:
         
-        **1. Auto Mode** (Best for stores)
-        - Automatically tries browser + HTTP scraping
-        - Works best when run locally
-        - Requires Selenium for best results
+        **1. {mode_label}** (Best for stores)
+        - {'HTTP-only scraping (no browser required)' if on_cloud else 'Automatically tries browser + HTTP scraping'}
+        - {'Best for Streamlit Cloud deployment' if on_cloud else 'Works best when run locally'}
         
         **2. Manual Links** (Always works)
         - Paste or upload product links directly
-        - Use this when automatic scraping is blocked
-        - No store detection needed
+        - Use when automatic scraping is blocked
         
-        **3. Local Only** (Selenium required)
-        - Forces browser-based scraping only
-        - Not available on Streamlit Cloud
-        - Most reliable for anti-bot protection
+        **3. Local Only** {'(Selenium required)' if not on_cloud else '(not available on cloud)'}
+        - {'Forces browser-based scraping' if not on_cloud else 'Unavailable in cloud mode'}
+        - {'Most reliable for anti-bot protection' if not on_cloud else 'Use Auto or Manual mode instead'}
         """)
 
     with st.sidebar.expander("🔗 Sample URLs"):
