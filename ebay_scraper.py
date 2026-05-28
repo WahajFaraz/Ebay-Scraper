@@ -192,7 +192,7 @@ def is_valid_item_link(href):
     if not href or len(href) < 20 or "/itm/" not in href:
         return False
     item_id = extract_item_id(href)
-    return bool(item_id and len(item_id) >= 8)
+    return bool(item_id and len(item_id) >= 7)
 
 
 def normalize_url(url):
@@ -259,6 +259,8 @@ def find_first_nonblocked_http_url(url, session):
         try:
             response = session.get(candidate, timeout=20)
             if response.status_code != 200:
+                continue
+            if is_blocked_page(response.text):
                 continue
             return candidate
         except Exception:
@@ -382,6 +384,15 @@ def is_blocked_page(html, soup=None):
         "please enable cookies",
         "pardon our interruption",
         "verifying your browser",
+        "unusual traffic",
+        "automated access",
+        "rate limit",
+        "too many requests",
+        "sorry, we can't access",
+        "blocked",
+        "just a moment",
+        "captcha",
+        "enable javascript",
     ]
     return any(phrase in text for phrase in blocked_phrases)
 
@@ -468,6 +479,9 @@ def get_total_products_http(store_url, session=None):
 
         html = response.text
         soup = BeautifulSoup(html, "html.parser")
+        if is_blocked_page(html, soup=soup):
+            return None
+
         text = soup.get_text(" ", strip=True)
 
         patterns = [
@@ -592,6 +606,23 @@ def get_all_product_links_http(store_url, on_progress=None, max_pages=50, sessio
                 break
             
             soup = BeautifulSoup(response.text, "html.parser")
+            
+            # If blocked, retry with longer delay
+            if is_blocked_page(response.text, soup=soup):
+                for retry in range(3):
+                    time.sleep(3 + (retry * 3))
+                    response = session.get(url, timeout=15)
+                    if response.status_code != 200:
+                        break
+                    soup = BeautifulSoup(response.text, "html.parser")
+                    if not is_blocked_page(response.text, soup=soup):
+                        break
+                else:
+                    no_change_counter += 3
+                    if no_change_counter >= 6:
+                        break
+                    continue
+
             page_links = []
 
             # Try multiple selectors to find product links
@@ -988,13 +1019,20 @@ def scrape_all_products(urls, selenium_driver=None, use_headless=True, max_worke
             on_progress(progress["done"], total, progress["scraped"])
 
     selenium_lock = threading.Lock()
+    _thread_local = threading.local()
+
+    def get_thread_session():
+        if not hasattr(_thread_local, "session"):
+            _thread_local.session = create_http_session()
+        return _thread_local.session
 
     def scrape_request(index, url):
         delay = (index % max_workers_actual) * 0.5
         time.sleep(delay)
+        thread_session = get_thread_session()
         return url, scrape_product(
             url,
-            session=None,
+            session=thread_session,
             selenium_driver=selenium_driver,
             selenium_lock=selenium_lock,
             debug=False,
@@ -1023,8 +1061,6 @@ def scrape_all_products(urls, selenium_driver=None, use_headless=True, max_worke
                         report()
         if batch_end < len(urls):
             time.sleep(1.5)
-    if session:
-        session.close()
     return all_data
 
 st.set_page_config(
@@ -1245,11 +1281,13 @@ def main():
         http_session = None
 
         if on_cloud:
-            st.info(
-                "☁️ **Streamlit Cloud Mode**: Using HTTP-only scraping. "
-                "eBay may block some requests. If scraping fails, switch to 'Manual Links' mode."
-            )
-            http_session = create_http_session()
+            st.info("☁️ **Streamlit Cloud Mode**: Attempting browser-based scraping...")
+            try:
+                driver = get_driver(use_headless=True)
+                st.success("✅ Browser initialized on cloud!")
+            except Exception as e:
+                st.warning(f"⚠️ Browser unavailable on cloud, falling back to HTTP: {str(e)[:100]}")
+                http_session = create_http_session()
         elif mode != "Manual Links":
             with st.spinner("🔄 Initializing scraper..."):
                 try:
