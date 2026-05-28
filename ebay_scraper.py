@@ -127,10 +127,15 @@ def clean_price(value):
         return ""
     price = re.sub(r"[^0-9.,$€£¥]", " ", value)
     price = re.sub(r"\s+", " ", price).strip()
-    match = re.search(r"[\$€£¥]?\s*([0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]{2})?)", price)
+    match = re.search(r"([\$€£¥])?\s*([0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]{2})?)", price)
     if match:
-        num = match.group(1)
-        symbol = "$" if "$" in value or "US" in value.upper() else ""
+        symbol = match.group(1) or ("$" if "US" in value.upper() else "")
+        num = match.group(2)
+        return f"{symbol}{num}" if symbol else num
+    match = re.search(r"([\$€£¥])?\s*([0-9]+(?:\.[0-9]{1,2})?)", value.replace(",", ""))
+    if match:
+        symbol = match.group(1) or ("$" if "US" in value.upper() else "")
+        num = match.group(2)
         return f"{symbol}{num}" if symbol else num
     return clean_text(value)
 
@@ -180,7 +185,6 @@ def create_http_session():
     for warmup_url in warmup_urls:
         try:
             session.get(warmup_url, timeout=10)
-            time.sleep(0.5)
         except Exception:
             pass
     
@@ -613,7 +617,7 @@ def _extract_links_from_page(driver):
     return links
 
 
-def get_all_product_links_http(store_url, on_progress=None, max_pages=200, session=None):
+def get_all_product_links_http(store_url, on_progress=None, max_pages=500, session=None):
     original_url = _strip_text(store_url)
     try:
         normalized_store_url = normalize_store_url(store_url)
@@ -646,7 +650,7 @@ def get_all_product_links_http(store_url, on_progress=None, max_pages=200, sessi
 
             if is_blocked_page(response.text, soup=soup):
                 for retry in range(3):
-                    time.sleep(4 + (retry * 4))
+                    time.sleep(2 + (retry * 2))
                     response = session.get(url, timeout=20)
                     if response.status_code != 200:
                         continue
@@ -655,7 +659,7 @@ def get_all_product_links_http(store_url, on_progress=None, max_pages=200, sessi
                         break
                 else:
                     no_change_counter += 3
-                    if no_change_counter >= 6:
+                    if no_change_counter >= 9:
                         break
                     continue
 
@@ -699,24 +703,23 @@ def get_all_product_links_http(store_url, on_progress=None, max_pages=200, sessi
                                 all_links.add(norm)
                                 page_links.append(norm)
 
-            # Dynamic items-per-page adjust
             if page == 1 and page_links:
                 detected = len(page_links)
                 if detected > 0:
-                    estimated_pages = min(999999 // detected + 5, max_pages)
-                    max_pages = max(estimated_pages, 50)
+                    needed = 999999 // detected + 5
+                    max_pages = max(max_pages, needed)
 
             if on_progress:
                 on_progress(page, max_pages, len(page_links), len(page_links), len(all_links))
 
             if not page_links:
                 no_change_counter += 1
-                if no_change_counter >= 3:
+                if no_change_counter >= 5:
                     break
             else:
                 no_change_counter = 0
 
-            time.sleep(0.6)
+            time.sleep(0.3)
         except Exception:
             continue
 
@@ -731,7 +734,7 @@ def get_all_product_links(store_url, driver, total_products=None, on_progress=No
     all_links = set()
     page = 1
     no_change_counter = 0
-    max_pages = 200
+    max_pages = 500
 
     base_url = store_url.split("&_pgn=")[0] if "_pgn=" in store_url else store_url
     separator = "&" if "?" in base_url else "?"
@@ -759,15 +762,15 @@ def get_all_product_links(store_url, driver, total_products=None, on_progress=No
             if page == 1 and links:
                 detected = len(links)
                 if detected > 0:
-                    estimated_pages = min(999999 // detected + 5, 200)
-                    max_pages = max(estimated_pages, 50)
+                    needed = 999999 // detected + 5
+                    max_pages = max(max_pages, needed)
 
             if on_progress:
                 on_progress(page, max_pages, len(links), new_items, len(all_links))
 
             if new_items == 0:
                 no_change_counter += 1
-                if no_change_counter >= 3:
+                if no_change_counter >= 5:
                     break
             else:
                 no_change_counter = 0
@@ -776,10 +779,10 @@ def get_all_product_links(store_url, driver, total_products=None, on_progress=No
                 break
 
             page += 1
-            time.sleep(0.5)
+            time.sleep(0.3)
         except Exception:
             no_change_counter += 1
-            if no_change_counter >= 3:
+            if no_change_counter >= 5:
                 break
             page += 1
 
@@ -798,6 +801,11 @@ def _fill_specs_from_soup(soup, data):
         "motion.div.ux-labels-values__labels-content",
         ".ux-item-specifications tr",
         ".itemAttr tr",
+        ".ux-spec-list",
+        ".spec-list",
+        "[data-testid='x-item-specifications']",
+        ".product-design-specs tr",
+        "div.vi-VR-mainV Specs tr",
     ]
     for selector in spec_selectors:
         for row in soup.select(selector):
@@ -948,7 +956,16 @@ def _extract_product_data(html, soup, url):
         attr="content",
     ) or _pick_text(
         soup,
-        ["#viTabs_0_is", ".ux-item-description-text", ".x-item-description-inner"],
+        [
+            "#viTabs_0_is",
+            ".ux-item-description-text",
+            ".x-item-description-inner",
+            "#desc_ifr",
+            "#itemDescDiv",
+            ".item-description",
+            "#item_description",
+            ".desc-wrap",
+        ],
     )
 
     _fill_specs_from_soup(soup, data)
@@ -962,8 +979,8 @@ def _extract_product_data(html, soup, url):
     for key in data:
         if isinstance(data[key], str):
             data[key] = clean_text(data[key])
-            if len(data[key]) > 500:
-                data[key] = data[key][:500]
+            if len(data[key]) > 5000:
+                data[key] = data[key][:5000]
 
     # Accept page if it has a title, regardless of other fields
     if data["title"] and len(data["title"]) > 3 and not is_blocked_page(html, soup=soup):
@@ -1008,14 +1025,14 @@ def scrape_product(url, session=None, selenium_driver=None, selenium_lock=None, 
                     print(f"[DEBUG] URL: {url} | Status: {response.status_code}")
                 if response.status_code != 200:
                     if attempt < max_retries - 1:
-                        time.sleep(2 + (attempt * 1.5))
+                        time.sleep(0.5 + (attempt * 0.3))
                         continue
                     return None
                 html = response.text
                 soup = BeautifulSoup(html, "html.parser")
                 if is_blocked_page(html, soup=soup):
                     if attempt < max_retries - 2:
-                        time.sleep(3 + (attempt * 2))
+                        time.sleep(1 + (attempt * 1))
                         continue
                     if selenium_driver is not None:
                         if selenium_lock is not None:
@@ -1027,14 +1044,14 @@ def scrape_product(url, session=None, selenium_driver=None, selenium_lock=None, 
                 if data:
                     return data
                 if attempt < max_retries - 1:
-                    time.sleep(1 + (attempt * 1))
+                    time.sleep(0.3 + (attempt * 0.3))
                     continue
                 return None
             except Exception as e:
                 if debug and attempt == 0:
                     print(f"[DEBUG] scrape_product exception for {url}: {e}")
                 if attempt < max_retries - 1:
-                    time.sleep(2 + (attempt * 1.5))
+                    time.sleep(0.5 + (attempt * 0.3))
                     continue
                 return None
         return None
@@ -1043,7 +1060,7 @@ def scrape_product(url, session=None, selenium_driver=None, selenium_lock=None, 
             session.close()
 
 
-def scrape_all_products(urls, selenium_driver=None, use_headless=True, max_workers=12, on_progress=None, session=None):
+def scrape_all_products(urls, selenium_driver=None, use_headless=True, max_workers=25, on_progress=None, session=None):
     if not urls:
         return []
     all_data = []
@@ -1051,8 +1068,8 @@ def scrape_all_products(urls, selenium_driver=None, use_headless=True, max_worke
     total = len(urls)
     progress = {"done": 0, "scraped": 0}
     progress_lock = threading.Lock()
-    batch_size = 16
-    max_workers_actual = min(max_workers, batch_size)
+    batch_size = 25
+    max_workers_actual = max_workers
 
     def report():
         if on_progress:
@@ -1067,8 +1084,6 @@ def scrape_all_products(urls, selenium_driver=None, use_headless=True, max_worke
         return _thread_local.session
 
     def scrape_request(index, url):
-        delay = (index % max_workers_actual) * 0.5
-        time.sleep(delay)
         thread_session = get_thread_session()
         return url, scrape_product(
             url,
@@ -1095,12 +1110,12 @@ def scrape_all_products(urls, selenium_driver=None, use_headless=True, max_worke
                                 all_data.append(data)
                                 progress["scraped"] += 1
                         report()
-                except Exception as e:
+                except Exception:
                     with progress_lock:
                         progress["done"] += 1
                         report()
         if batch_end < len(urls):
-            time.sleep(1.5)
+            time.sleep(0.25)
     return all_data
 
 st.set_page_config(
@@ -1153,7 +1168,7 @@ def _scrape_all_products_ui(urls, progress_bar, selenium_driver=None, use_headle
         urls,
         selenium_driver=selenium_driver,
         use_headless=use_headless,
-        max_workers=12,
+        max_workers=25,
         on_progress=on_progress,
         session=session,
     )
