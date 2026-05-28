@@ -489,33 +489,64 @@ def get_total_products_http(store_url, session=None):
         if is_blocked_page(html, soup=soup):
             return None
 
+        # Method 1: JSON-LD structured data
+        for script in soup.find_all("script", {"type": "application/ld+json"}):
+            try:
+                payload = json.loads(script.string or "{}")
+                items = payload if isinstance(payload, list) else [payload]
+                for item in items:
+                    if isinstance(item, dict):
+                        for key in ("numberOfItems", "itemListElement", "size"):
+                            val = item.get(key)
+                            if val:
+                                if isinstance(val, list):
+                                    val = len(val)
+                                try:
+                                    n = int(float(str(val)))
+                                    if n > 0 and n < 9999999:
+                                        return n
+                                except (ValueError, TypeError):
+                                    pass
+            except Exception:
+                pass
+
+        # Method 2: srp-controls heading (most reliable)
+        for sel in (".srp-controls__count-heading", ".list__summary", ".rcnt"):
+            el = soup.select_one(sel)
+            if el:
+                txt = el.get_text(" ", strip=True)
+                m = re.search(r"of\s+([0-9,]+)", txt, re.IGNORECASE)
+                if m:
+                    n = int(m.group(1).replace(",", ""))
+                    if n > 0:
+                        return n
+                m = re.search(r"([0-9,]+)\s+(?:results|items|listings)", txt, re.IGNORECASE)
+                if m:
+                    n = int(m.group(1).replace(",", ""))
+                    if n > 0:
+                        return n
+
+        # Method 3: BOLD span in heading
+        for h in soup.find_all(["h1", "h2", "h3", "span"]):
+            txt = h.get_text(" ", strip=True)
+            m = re.search(r"of\s+([0-9,]+)", txt, re.IGNORECASE)
+            if m:
+                n = int(m.group(1).replace(",", ""))
+                if n > 0 and n < 9999999:
+                    return n
+
+        # Method 4: full text regex (broad)
         text = soup.get_text(" ", strip=True)
-
-        patterns = [
-            (r"of\s+([0-9,]+)\s+results", 1),
-            (r"([0-9,]+)\s+results", 1),
-            (r"of\s+([0-9,]+)\s+items", 1),
-            (r"([0-9,]+)\s+items", 1),
-            (r"of\s+([0-9,]+)\s+listings", 1),
-            (r"([0-9,]+)\s+listings", 1),
-            (r"([0-9,]+)\s+products", 1),
-        ]
-        for pattern, group in patterns:
-            match = re.search(pattern, text, re.IGNORECASE)
-            if match:
-                total_str = match.group(group).replace(",", "")
-                if total_str.isdigit() and int(total_str) > 0:
-                    return int(total_str)
-
-        # Try from srp-controls
-        count_el = soup.select_one(".srp-controls__count-heading, .rcnt, span.BOLD:first-child")
-        if count_el:
-            count_text = count_el.get_text(" ", strip=True)
-            match = re.search(r"([0-9,]+)", count_text)
-            if match:
-                total_str = match.group(1).replace(",", "")
-                if total_str.isdigit() and int(total_str) > 0:
-                    return int(total_str)
+        for pat in (
+            r"of\s+([0-9,]+)\s+(?:results|items|listings)",
+            r"([0-9,]+)\s+(?:results|items|listings)\s+found",
+            r"([0-9,]+)\s+(?:results|items|listings)$",
+        ):
+            m = re.search(pat, text, re.IGNORECASE)
+            if m:
+                n = int(m.group(1).replace(",", ""))
+                if n > 0 and n < 9999999:
+                    return n
     except Exception:
         pass
     finally:
@@ -582,8 +613,7 @@ def _extract_links_from_page(driver):
     return links
 
 
-def get_all_product_links_http(store_url, on_progress=None, max_pages=50, session=None):
-    """Collect product links using HTTP requests only (no Selenium)"""
+def get_all_product_links_http(store_url, on_progress=None, max_pages=200, session=None):
     original_url = _strip_text(store_url)
     try:
         normalized_store_url = normalize_store_url(store_url)
@@ -603,23 +633,21 @@ def get_all_product_links_http(store_url, on_progress=None, max_pages=50, sessio
     base_url = active_url.split("&_pgn=")[0] if "_pgn=" in active_url else active_url
     separator = "&" if "?" in base_url else "?"
     no_change_counter = 0
-    last_page_with_links = 0
 
-    detected_ipg = None
     for page in range(1, max_pages + 1):
         url = f"{base_url}{separator}_pgn={page}"
+        page_links = []
         try:
-            response = session.get(url, timeout=15)
+            response = session.get(url, timeout=20)
             if response.status_code != 200:
                 continue
 
             soup = BeautifulSoup(response.text, "html.parser")
 
-            # If blocked, retry with longer delay
             if is_blocked_page(response.text, soup=soup):
                 for retry in range(3):
-                    time.sleep(3 + (retry * 3))
-                    response = session.get(url, timeout=15)
+                    time.sleep(4 + (retry * 4))
+                    response = session.get(url, timeout=20)
                     if response.status_code != 200:
                         continue
                     soup = BeautifulSoup(response.text, "html.parser")
@@ -631,58 +659,52 @@ def get_all_product_links_http(store_url, on_progress=None, max_pages=50, sessio
                         break
                     continue
 
-            page_links = []
-
-            # Try multiple selectors to find product links
-            selectors_to_try = [
-                ("a[href*='/itm/']", None),
-                ("a.s-item__link", None),
-                (".s-item a[href*='/itm/']", None),
-                (".b-list__items a[href*='/itm/']", None),
-                ("a.vip", None),
-            ]
-
-            for selector, attr in selectors_to_try:
-                elements = soup.select(selector) if attr is None else [e for e in soup.find_all('a') if '/itm/' in (e.get('href', '') or '')]
-                for elem in elements:
+            # Extract links: selectors first, then regex fallback
+            for sel in (
+                "a[href*='/itm/']",
+                "a.s-item__link",
+                ".s-item a[href*='/itm/']",
+                ".b-list__items a[href*='/itm/']",
+                "a.vip",
+                "a[href*='itm']",
+            ):
+                for a in soup.select(sel):
                     try:
-                        href = elem.get("href", "") if attr is None else str(elem)
+                        href = a.get("href", "")
                         if is_valid_item_link(href):
-                            normalized = normalize_url(href)
-                            if normalized not in all_links:
-                                all_links.add(normalized)
-                                page_links.append(normalized)
+                            norm = normalize_url(href)
+                            if norm not in all_links:
+                                all_links.add(norm)
+                                page_links.append(norm)
                     except Exception:
                         continue
-
                 if page_links:
                     break
 
-            # Regex fallback: extract links from raw HTML
+            # Regex fallback
             if not page_links:
-                html_text = response.text
-                for match in re.finditer(r'https?://www\.ebay\.com/itm/[0-9]+[^"\'\s<>]*', html_text):
-                    href = match.group(0)
+                for m in re.finditer(r'https?://[^"\']*ebay[^"\']*/itm/[0-9]{7,}[^"\'\s<>]*', response.text):
+                    href = m.group(0).split("?")[0]
                     if is_valid_item_link(href):
-                        normalized = normalize_url(href)
-                        if normalized not in all_links:
-                            all_links.add(normalized)
-                            page_links.append(normalized)
+                        norm = normalize_url(href)
+                        if norm not in all_links:
+                            all_links.add(norm)
+                            page_links.append(norm)
                 if not page_links:
-                    for match in re.finditer(r'/itm/[0-9]+[^"\'\s<>]*', html_text):
-                        href = "https://www.ebay.com" + match.group(0)
+                    for m in re.finditer(r'/itm/[0-9]{7,}[^"\'\s<>]*', response.text):
+                        href = "https://www.ebay.com" + m.group(0).split("?")[0]
                         if is_valid_item_link(href):
-                            normalized = normalize_url(href)
-                            if normalized not in all_links:
-                                all_links.add(normalized)
-                                page_links.append(normalized)
+                            norm = normalize_url(href)
+                            if norm not in all_links:
+                                all_links.add(norm)
+                                page_links.append(norm)
 
-            # Detect actual items per page from first page and adjust max_pages
+            # Dynamic items-per-page adjust
             if page == 1 and page_links:
-                detected_ipg = len(page_links)
-                if total_products and detected_ipg > 0:
-                    needed = math.ceil(total_products / detected_ipg) + 3
-                    max_pages = min(needed, 100)
+                detected = len(page_links)
+                if detected > 0:
+                    estimated_pages = min(999999 // detected + 5, max_pages)
+                    max_pages = max(estimated_pages, 50)
 
             if on_progress:
                 on_progress(page, max_pages, len(page_links), len(page_links), len(all_links))
@@ -693,15 +715,14 @@ def get_all_product_links_http(store_url, on_progress=None, max_pages=50, sessio
                     break
             else:
                 no_change_counter = 0
-                last_page_with_links = page
 
-            time.sleep(0.8)
-        except Exception as e:
+            time.sleep(0.6)
+        except Exception:
             continue
 
     if own_session:
         session.close()
-    
+
     return list(all_links)
 
 
@@ -710,8 +731,7 @@ def get_all_product_links(store_url, driver, total_products=None, on_progress=No
     all_links = set()
     page = 1
     no_change_counter = 0
-    max_pages = 100
-    detected_ipg = None
+    max_pages = 200
 
     base_url = store_url.split("&_pgn=")[0] if "_pgn=" in store_url else store_url
     separator = "&" if "?" in base_url else "?"
@@ -737,10 +757,10 @@ def get_all_product_links(store_url, driver, total_products=None, on_progress=No
                     new_items += 1
 
             if page == 1 and links:
-                detected_ipg = len(links)
-                if total_products and detected_ipg > 0:
-                    needed = math.ceil(total_products / detected_ipg) + 3
-                    max_pages = min(needed, 100)
+                detected = len(links)
+                if detected > 0:
+                    estimated_pages = min(999999 // detected + 5, 200)
+                    max_pages = max(estimated_pages, 50)
 
             if on_progress:
                 on_progress(page, max_pages, len(links), new_items, len(all_links))
@@ -1347,6 +1367,7 @@ def main():
             links_progress.progress(1.0, text=f"✅ Found {len(all_links):,} product links")
             if all_links:
                 st.success(f"🔗 Product Links Collected: {len(all_links):,}")
+                total_progress.progress(1.0, text=f"✅ Found {len(all_links):,} total products")
             else:
                 st.warning("⚠️ No links found via browser. This store might be blocked or empty.")
         else:
@@ -1362,12 +1383,12 @@ def main():
             all_links = get_all_product_links_http(
                 store_url,
                 on_progress=on_http_progress,
-                max_pages=100,
                 session=http_session,
             )
             links_progress.progress(1.0, text=f"Found {len(all_links):,} product links")
             if all_links:
                 st.success(f"🔗 Product Links Collected: {len(all_links):,}")
+                total_progress.progress(1.0, text=f"✅ Found {len(all_links):,} total products")
             else:
                 st.error(
                     "❌ **eBay blocked link collection via HTTP.** This is an eBay anti-bot protection. "
