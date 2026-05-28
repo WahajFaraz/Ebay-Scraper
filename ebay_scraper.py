@@ -743,14 +743,14 @@ def get_all_product_links(store_url, driver, total_products=None, on_progress=No
         url = f"{base_url}{separator}_pgn={page}"
         try:
             driver.get(url)
-            WebDriverWait(driver, 10).until(
+            WebDriverWait(driver, 8).until(
                 EC.presence_of_element_located((By.CSS_SELECTOR, "a[href*='/itm/'], a.s-item__link"))
             )
-            time.sleep(1.0)
-            driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
             time.sleep(0.5)
+            driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+            time.sleep(0.2)
             driver.execute_script("window.scrollTo(0, 0);")
-            time.sleep(0.3)
+            time.sleep(0.1)
 
             links = _extract_links_from_page(driver)
             new_items = 0
@@ -993,8 +993,8 @@ def _scrape_product_with_selenium(url, driver, debug=False):
         return None
     try:
         driver.get(url)
-        WebDriverWait(driver, 20).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
-        time.sleep(1.5)
+        WebDriverWait(driver, 15).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+        time.sleep(0.5)
         html = driver.page_source
         soup = BeautifulSoup(html, "html.parser")
         if not is_valid_product_page(html, url=url, soup=soup):
@@ -1010,7 +1010,6 @@ def _scrape_product_with_selenium(url, driver, debug=False):
 
 def scrape_product(url, session=None, selenium_driver=None, selenium_lock=None, debug=False):
     url = normalize_url(url)
-    max_retries = 5
     own_session = False
 
     if session is None:
@@ -1018,21 +1017,21 @@ def scrape_product(url, session=None, selenium_driver=None, selenium_lock=None, 
         own_session = True
 
     try:
-        for attempt in range(max_retries):
+        for attempt in range(3):
             try:
-                response = session.get(url, timeout=20)
+                response = session.get(url, timeout=15)
                 if debug and attempt == 0:
                     print(f"[DEBUG] URL: {url} | Status: {response.status_code}")
                 if response.status_code != 200:
-                    if attempt < max_retries - 1:
-                        time.sleep(0.5 + (attempt * 0.3))
+                    if attempt < 2:
+                        time.sleep(0.3)
                         continue
                     return None
                 html = response.text
                 soup = BeautifulSoup(html, "html.parser")
                 if is_blocked_page(html, soup=soup):
-                    if attempt < max_retries - 2:
-                        time.sleep(1 + (attempt * 1))
+                    if attempt < 1:
+                        time.sleep(0.5)
                         continue
                     if selenium_driver is not None:
                         if selenium_lock is not None:
@@ -1043,15 +1042,13 @@ def scrape_product(url, session=None, selenium_driver=None, selenium_lock=None, 
                 data = _extract_product_data(html, soup, url)
                 if data:
                     return data
-                if attempt < max_retries - 1:
-                    time.sleep(0.3 + (attempt * 0.3))
+                if attempt < 2:
+                    time.sleep(0.2)
                     continue
                 return None
-            except Exception as e:
-                if debug and attempt == 0:
-                    print(f"[DEBUG] scrape_product exception for {url}: {e}")
-                if attempt < max_retries - 1:
-                    time.sleep(0.5 + (attempt * 0.3))
+            except Exception:
+                if attempt < 2:
+                    time.sleep(0.3)
                     continue
                 return None
         return None
@@ -1060,7 +1057,7 @@ def scrape_product(url, session=None, selenium_driver=None, selenium_lock=None, 
             session.close()
 
 
-def scrape_all_products(urls, selenium_driver=None, use_headless=True, max_workers=25, on_progress=None, session=None):
+def scrape_all_products(urls, selenium_driver=None, use_headless=True, max_workers=50, on_progress=None, session=None):
     if not urls:
         return []
     all_data = []
@@ -1068,8 +1065,6 @@ def scrape_all_products(urls, selenium_driver=None, use_headless=True, max_worke
     total = len(urls)
     progress = {"done": 0, "scraped": 0}
     progress_lock = threading.Lock()
-    batch_size = 25
-    max_workers_actual = max_workers
 
     def report():
         if on_progress:
@@ -1083,7 +1078,7 @@ def scrape_all_products(urls, selenium_driver=None, use_headless=True, max_worke
             _thread_local.session = create_http_session()
         return _thread_local.session
 
-    def scrape_request(index, url):
+    def scrape_request(url):
         thread_session = get_thread_session()
         return url, scrape_product(
             url,
@@ -1093,29 +1088,24 @@ def scrape_all_products(urls, selenium_driver=None, use_headless=True, max_worke
             debug=False,
         )
 
-    for batch_start in range(0, len(urls), batch_size):
-        batch_end = min(batch_start + batch_size, len(urls))
-        batch_urls = [(i, url) for i, url in enumerate(urls[batch_start:batch_end], start=batch_start)]
-        with ThreadPoolExecutor(max_workers=max_workers_actual) as executor:
-            futures = {executor.submit(scrape_request, idx, url): url for idx, url in batch_urls}
-            for future in as_completed(futures):
-                try:
-                    url, data = future.result()
-                    item_id = extract_item_id(url)
-                    with progress_lock:
-                        progress["done"] += 1
-                        if data and data.get("title"):
-                            if item_id and item_id not in seen_items:
-                                seen_items.add(item_id)
-                                all_data.append(data)
-                                progress["scraped"] += 1
-                        report()
-                except Exception:
-                    with progress_lock:
-                        progress["done"] += 1
-                        report()
-        if batch_end < len(urls):
-            time.sleep(0.25)
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {executor.submit(scrape_request, url): url for url in urls}
+        for future in as_completed(futures):
+            try:
+                url, data = future.result()
+                item_id = extract_item_id(url)
+                with progress_lock:
+                    progress["done"] += 1
+                    if data and data.get("title"):
+                        if item_id and item_id not in seen_items:
+                            seen_items.add(item_id)
+                            all_data.append(data)
+                            progress["scraped"] += 1
+                    report()
+            except Exception:
+                with progress_lock:
+                    progress["done"] += 1
+                    report()
     return all_data
 
 st.set_page_config(
@@ -1147,28 +1137,31 @@ def _get_all_product_links_ui(store_url, driver, progress_bar, total_products=No
 
 def _scrape_all_products_ui(urls, progress_bar, selenium_driver=None, use_headless=True, session=None):
     status_placeholder = st.empty()
-    batch_size = 50
-    total_batches = (len(urls) + batch_size - 1) // batch_size
+    report_interval = max(len(urls) // 100, 1)
+    _t0 = time.time()
 
     def on_progress(done, total, scraped_count):
+        if done % report_interval != 0 and done != total:
+            return
+        elapsed = time.time() - _t0
+        speed = int(done / max(elapsed, 1))
         progress_ratio = min(done / max(total, 1), 1.0)
-        current_batch = (done // batch_size) + 1
+        pct = int(progress_ratio * 100)
         progress_bar.progress(
-            progress_ratio, 
-            text=f"Batch {current_batch}/{total_batches}: Scraped {scraped_count}/{total} products"
+            progress_ratio,
+            text=f"Scraping... {scraped_count}/{total} products ({pct}%)"
         )
         status_placeholder.markdown(
             f"**Processed:** {min(done, total)} / {total}  \n"
             f"**Saved:** {scraped_count}  \n"
-            f"**Batch:** {current_batch}/{total_batches}  \n"
-            f"**Batch Size:** 50 products"
+            f"**Speed:** {speed}/sec"
         )
 
     all_data = scrape_all_products(
         urls,
         selenium_driver=selenium_driver,
         use_headless=use_headless,
-        max_workers=25,
+        max_workers=50,
         on_progress=on_progress,
         session=session,
     )
