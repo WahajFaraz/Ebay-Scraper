@@ -130,7 +130,6 @@ def clean_price(value):
 
 def create_http_session():
     from requests.adapters import Retry
-    import http.cookiejar
     
     session = requests.Session()
     retry_strategy = Retry(
@@ -455,9 +454,10 @@ def get_total_products(url, driver):
 
 
 def get_total_products_http(store_url, session=None):
+    url = None
+    own_session = False
     try:
         url = normalize_store_url(store_url)
-        own_session = False
         if session is None:
             session = create_http_session()
             own_session = True
@@ -495,11 +495,14 @@ def get_total_products_http(store_url, session=None):
                 total_str = match.group(1).replace(",", "")
                 if total_str.isdigit() and int(total_str) > 0:
                     return int(total_str)
-
-        if own_session:
-            session.close()
     except Exception:
         pass
+    finally:
+        if own_session and session:
+            try:
+                session.close()
+            except Exception:
+                pass
     return None
 
 
@@ -596,11 +599,10 @@ def get_all_product_links_http(store_url, on_progress=None, max_pages=50, sessio
                 ("a[href*='/itm/']", None),
                 ("a.s-item__link", None),
                 (".s-item a[href*='/itm/']", None),
-                ("a", "href"),
             ]
             
             for selector, attr in selectors_to_try:
-                elements = soup.select(selector) if attr is None else [e for e in soup.find_all(attr) if '/itm/' in str(e)]
+                elements = soup.select(selector) if attr is None else [e for e in soup.find_all('a') if '/itm/' in (e.get('href', '') or '')]
                 for elem in elements:
                     try:
                         href = elem.get("href", "") if attr is None else str(elem)
@@ -614,6 +616,25 @@ def get_all_product_links_http(store_url, on_progress=None, max_pages=50, sessio
                 
                 if page_links:
                     break
+
+            # Regex fallback: extract links from raw HTML
+            if not page_links:
+                html_text = response.text
+                for match in re.finditer(r'https?://www\.ebay\.com/itm/[0-9]+[^"\'\s<>]*', html_text):
+                    href = match.group(0)
+                    if is_valid_item_link(href):
+                        normalized = normalize_url(href)
+                        if normalized not in all_links:
+                            all_links.add(normalized)
+                            page_links.append(normalized)
+                if not page_links:
+                    for match in re.finditer(r'/itm/[0-9]+[^"\'\s<>]*', html_text):
+                        href = "https://www.ebay.com" + match.group(0)
+                        if is_valid_item_link(href):
+                            normalized = normalize_url(href)
+                            if normalized not in all_links:
+                                all_links.add(normalized)
+                                page_links.append(normalized)
 
             if on_progress:
                 on_progress(page, max_pages, len(page_links), len(page_links), len(all_links))
@@ -902,51 +923,53 @@ def _scrape_product_with_selenium(url, driver, debug=False):
 def scrape_product(url, session=None, selenium_driver=None, selenium_lock=None, debug=False):
     url = normalize_url(url)
     max_retries = 5
+    own_session = False
 
-    for attempt in range(max_retries):
-        try:
-            if session is None:
-                session = create_http_session()
-            response = session.get(url, timeout=20)
-            if debug and attempt == 0:
-                print(f"[DEBUG] URL: {url} | Status: {response.status_code}")
-            if response.status_code != 200:
+    if session is None:
+        session = create_http_session()
+        own_session = True
+
+    try:
+        for attempt in range(max_retries):
+            try:
+                response = session.get(url, timeout=20)
+                if debug and attempt == 0:
+                    print(f"[DEBUG] URL: {url} | Status: {response.status_code}")
+                if response.status_code != 200:
+                    if attempt < max_retries - 1:
+                        time.sleep(2 + (attempt * 1.5))
+                        continue
+                    return None
+                html = response.text
+                soup = BeautifulSoup(html, "html.parser")
+                if is_blocked_page(html, soup=soup):
+                    if attempt < max_retries - 2:
+                        time.sleep(3 + (attempt * 2))
+                        continue
+                    if selenium_driver is not None:
+                        if selenium_lock is not None:
+                            with selenium_lock:
+                                return _scrape_product_with_selenium(url, selenium_driver, debug=debug)
+                        return _scrape_product_with_selenium(url, selenium_driver, debug=debug)
+                    return None
+                data = _extract_product_data(html, soup, url)
+                if data:
+                    return data
+                if attempt < max_retries - 1:
+                    time.sleep(1 + (attempt * 1))
+                    continue
+                return None
+            except Exception as e:
+                if debug and attempt == 0:
+                    print(f"[DEBUG] scrape_product exception for {url}: {e}")
                 if attempt < max_retries - 1:
                     time.sleep(2 + (attempt * 1.5))
                     continue
                 return None
-            html = response.text
-            soup = BeautifulSoup(html, "html.parser")
-            if is_blocked_page(html, soup=soup):
-                # Retry blocked pages a few more times
-                if attempt < max_retries - 2:
-                    time.sleep(3 + (attempt * 2))
-                    continue
-                # Fall back to Selenium if available
-                if selenium_driver is not None:
-                    if selenium_lock is not None:
-                        with selenium_lock:
-                            return _scrape_product_with_selenium(url, selenium_driver, debug=debug)
-                    return _scrape_product_with_selenium(url, selenium_driver, debug=debug)
-                return None
-            
-            # Try to extract data even if page validation is loose
-            data = _extract_product_data(html, soup, url)
-            if data:
-                return data
-            
-            if attempt < max_retries - 1:
-                time.sleep(1 + (attempt * 1))
-                continue
-            return None
-        except Exception as e:
-            if debug and attempt == 0:
-                print(f"[DEBUG] scrape_product exception for {url}: {e}")
-            if attempt < max_retries - 1:
-                time.sleep(2 + (attempt * 1.5))
-                continue
-            return None
-    return None
+        return None
+    finally:
+        if own_session:
+            session.close()
 
 
 def scrape_all_products(urls, selenium_driver=None, use_headless=True, max_workers=12, on_progress=None, session=None):
@@ -958,16 +981,12 @@ def scrape_all_products(urls, selenium_driver=None, use_headless=True, max_worke
     progress = {"done": 0, "scraped": 0}
     progress_lock = threading.Lock()
     batch_size = 16
-    max_workers_actual = 8
+    max_workers_actual = min(max_workers, batch_size)
 
     def report():
         if on_progress:
             on_progress(progress["done"], total, progress["scraped"])
 
-    own_session = False
-    if session is None:
-        session = create_http_session()
-        own_session = True
     selenium_lock = threading.Lock()
 
     def scrape_request(index, url):
@@ -975,7 +994,7 @@ def scrape_all_products(urls, selenium_driver=None, use_headless=True, max_worke
         time.sleep(delay)
         return url, scrape_product(
             url,
-            session=session,
+            session=None,
             selenium_driver=selenium_driver,
             selenium_lock=selenium_lock,
             debug=False,
@@ -1004,7 +1023,7 @@ def scrape_all_products(urls, selenium_driver=None, use_headless=True, max_worke
                         report()
         if batch_end < len(urls):
             time.sleep(1.5)
-    if own_session:
+    if session:
         session.close()
     return all_data
 
@@ -1282,10 +1301,14 @@ def main():
                     progress_ratio,
                     text=f"Page {page}: Collected {total_links} unique links"
                 )
+            http_max_pages = min(
+                math.ceil((total_products or 99999) / 240) + 2,
+                100
+            )
             all_links = get_all_product_links_http(
                 store_url,
                 on_progress=on_http_progress,
-                max_pages=100,
+                max_pages=http_max_pages,
                 session=http_session,
             )
             links_progress.progress(1.0, text=f"Found {len(all_links):,} product links")
