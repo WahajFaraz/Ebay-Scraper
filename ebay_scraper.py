@@ -74,7 +74,14 @@ def normalize_store_url(url):
 def is_ebay_store_url(url):
     parsed = urlparse(url)
     path = parsed.path.lower()
-    return "/str/" in path or "/usr/" in path or "/store/" in path or path.startswith("/b/")
+    netloc = parsed.netloc.lower()
+    return (
+        "/str/" in path
+        or "/usr/" in path
+        or "/store/" in path
+        or netloc == "stores.ebay.com"
+        or netloc.startswith("stores.ebay.com.")
+    )
 
 
 def is_ebay_search_url(url):
@@ -598,22 +605,23 @@ def get_all_product_links_http(store_url, on_progress=None, max_pages=50, sessio
     no_change_counter = 0
     last_page_with_links = 0
 
+    detected_ipg = None
     for page in range(1, max_pages + 1):
         url = f"{base_url}{separator}_pgn={page}"
         try:
             response = session.get(url, timeout=15)
             if response.status_code != 200:
-                break
-            
+                continue
+
             soup = BeautifulSoup(response.text, "html.parser")
-            
+
             # If blocked, retry with longer delay
             if is_blocked_page(response.text, soup=soup):
                 for retry in range(3):
                     time.sleep(3 + (retry * 3))
                     response = session.get(url, timeout=15)
                     if response.status_code != 200:
-                        break
+                        continue
                     soup = BeautifulSoup(response.text, "html.parser")
                     if not is_blocked_page(response.text, soup=soup):
                         break
@@ -630,8 +638,10 @@ def get_all_product_links_http(store_url, on_progress=None, max_pages=50, sessio
                 ("a[href*='/itm/']", None),
                 ("a.s-item__link", None),
                 (".s-item a[href*='/itm/']", None),
+                (".b-list__items a[href*='/itm/']", None),
+                ("a.vip", None),
             ]
-            
+
             for selector, attr in selectors_to_try:
                 elements = soup.select(selector) if attr is None else [e for e in soup.find_all('a') if '/itm/' in (e.get('href', '') or '')]
                 for elem in elements:
@@ -644,7 +654,7 @@ def get_all_product_links_http(store_url, on_progress=None, max_pages=50, sessio
                                 page_links.append(normalized)
                     except Exception:
                         continue
-                
+
                 if page_links:
                     break
 
@@ -667,6 +677,13 @@ def get_all_product_links_http(store_url, on_progress=None, max_pages=50, sessio
                                 all_links.add(normalized)
                                 page_links.append(normalized)
 
+            # Detect actual items per page from first page and adjust max_pages
+            if page == 1 and page_links:
+                detected_ipg = len(page_links)
+                if total_products and detected_ipg > 0:
+                    needed = math.ceil(total_products / detected_ipg) + 3
+                    max_pages = min(needed, 100)
+
             if on_progress:
                 on_progress(page, max_pages, len(page_links), len(page_links), len(all_links))
 
@@ -680,7 +697,7 @@ def get_all_product_links_http(store_url, on_progress=None, max_pages=50, sessio
 
             time.sleep(0.8)
         except Exception as e:
-            break
+            continue
 
     if own_session:
         session.close()
@@ -693,11 +710,8 @@ def get_all_product_links(store_url, driver, total_products=None, on_progress=No
     all_links = set()
     page = 1
     no_change_counter = 0
-    items_per_page = 240
-    if total_products and total_products > 0:
-        max_pages = min(math.ceil(total_products / items_per_page) + 2, 100)
-    else:
-        max_pages = 50
+    max_pages = 100
+    detected_ipg = None
 
     base_url = store_url.split("&_pgn=")[0] if "_pgn=" in store_url else store_url
     separator = "&" if "?" in base_url else "?"
@@ -721,6 +735,12 @@ def get_all_product_links(store_url, driver, total_products=None, on_progress=No
                 if link not in all_links:
                     all_links.add(link)
                     new_items += 1
+
+            if page == 1 and links:
+                detected_ipg = len(links)
+                if total_products and detected_ipg > 0:
+                    needed = math.ceil(total_products / detected_ipg) + 3
+                    max_pages = min(needed, 100)
 
             if on_progress:
                 on_progress(page, max_pages, len(links), new_items, len(all_links))
@@ -1339,14 +1359,10 @@ def main():
                     progress_ratio,
                     text=f"Page {page}: Collected {total_links} unique links"
                 )
-            http_max_pages = min(
-                math.ceil((total_products or 99999) / 240) + 2,
-                100
-            )
             all_links = get_all_product_links_http(
                 store_url,
                 on_progress=on_http_progress,
-                max_pages=http_max_pages,
+                max_pages=100,
                 session=http_session,
             )
             links_progress.progress(1.0, text=f"Found {len(all_links):,} product links")
