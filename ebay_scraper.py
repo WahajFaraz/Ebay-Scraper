@@ -141,16 +141,8 @@ def clean_price(value):
 
 
 def create_http_session():
-    from requests.adapters import Retry
-    
     session = requests.Session()
-    retry_strategy = Retry(
-        total=5,
-        status_forcelist=[429, 500, 502, 503, 504],
-        allowed_methods=["GET", "HEAD"],
-        backoff_factor=1.2,
-    )
-    adapter = requests.adapters.HTTPAdapter(max_retries=retry_strategy, pool_connections=100, pool_maxsize=100)
+    adapter = requests.adapters.HTTPAdapter(pool_connections=100, pool_maxsize=100)
     session.mount("http://", adapter)
     session.mount("https://", adapter)
     
@@ -576,6 +568,12 @@ def _extract_links_from_page(driver):
     try:
         for item in driver.find_elements(By.CSS_SELECTOR, "a.s-item__link"):
             try:
+                parent = item.find_element(By.XPATH, "./ancestor::*[contains(@class, 's-item--sponsored')]")
+                if parent:
+                    continue
+            except Exception:
+                pass
+            try:
                 add_link(item.get_attribute("href"))
             except Exception:
                 continue
@@ -584,10 +582,9 @@ def _extract_links_from_page(driver):
 
     if not links:
         for selector in (
-            ".s-item a[href*='/itm/']",
+            ".s-item:not(.s-item--sponsored) a[href*='/itm/']",
             ".b-list__items a[href*='/itm/']",
             ".s-result-item a[href*='/itm/']",
-            "a[href*='/itm/']",
         ):
             try:
                 for elem in driver.find_elements(By.CSS_SELECTOR, selector):
@@ -664,17 +661,18 @@ def get_all_product_links_http(store_url, on_progress=None, max_pages=500, sessi
                         break
                     continue
 
-            # Extract links: narrow selectors FIRST (main product grid only), broad fallback LAST
             for sel in (
-                ".s-item a[href*='/itm/']",
+                ".s-item:not(.s-item--sponsored) a[href*='/itm/']",
                 ".b-list__items a[href*='/itm/']",
                 "a.s-item__link",
                 "a.vip",
                 ".s-item a[href*='itm']",
-                "a[href*='/itm/']",
             ):
                 for a in soup.select(sel):
                     try:
+                        parent = a.find_parent(class_="s-item--sponsored")
+                        if parent:
+                            continue
                         href = a.get("href", "")
                         if is_valid_item_link(href):
                             norm = normalize_url(href)
@@ -1106,13 +1104,22 @@ def scrape_all_products(urls, selenium_driver=None, use_headless=True, max_worke
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {executor.submit(scrape_request, url): url for url in urls}
         pending = set(futures.keys())
+        stuck_count = 0
         while pending:
             elapsed = time.time() - start_time
             remaining = max(timeout - elapsed, 0)
             done, pending = wait(pending, timeout=min(remaining, 5))
+            if not done:
+                stuck_count += 1
+                if stuck_count >= 6:
+                    for f in pending:
+                        f.cancel()
+                    break
+                continue
+            stuck_count = 0
             for future in done:
                 try:
-                    url, data = future.result()
+                    url, data = future.result(timeout=5)
                     item_id = extract_item_id(url)
                     with progress_lock:
                         progress["done"] += 1
@@ -1124,6 +1131,7 @@ def scrape_all_products(urls, selenium_driver=None, use_headless=True, max_worke
                                 seen_items.add(item_id)
                                 all_data.append(data)
                                 progress["scraped"] += 1
+                    with progress_lock:
                         progress["last_report"] += 1
                         if progress["last_report"] >= 5 or progress["done"] == total:
                             progress["last_report"] = 0
