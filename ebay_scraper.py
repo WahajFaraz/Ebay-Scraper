@@ -1,16 +1,20 @@
+# -*- coding: utf-8 -*-
 import os
+import sys
 import re
 import json
 import math
 import time
 import threading
+import traceback
 import requests
-import streamlit as st
 import pandas as pd
 from io import BytesIO
 from bs4 import BeautifulSoup
 from urllib.parse import urlparse, parse_qs, quote_plus
 from concurrent.futures import ThreadPoolExecutor, as_completed, wait
+
+import streamlit as st
 
 try:
     from selenium import webdriver
@@ -285,45 +289,70 @@ def find_first_nonblocked_http_url(url, session):
 def get_driver(use_headless=True):
     if not SELENIUM_AVAILABLE:
         raise RuntimeError("Selenium is not installed")
+    use_uc = UC_AVAILABLE and os.environ.get("USE_UC", "0") == "1"
+    chrome_options = uc.ChromeOptions() if use_uc else Options()
 
-    chrome_options = uc.ChromeOptions() if UC_AVAILABLE else Options()
     chrome_options.add_argument("--headless")
+    chrome_options.add_argument("--window-size=1920,1080")
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
+    chrome_options.add_argument("--disable-blink-features=AutomationControlled")
+    chrome_options.add_argument("--disable-extensions")
     chrome_options.add_argument("--disable-gpu")
-    chrome_options.add_argument("--disable-software-rasterizer")
-    chrome_options.add_argument("--window-size=1280,720")
+    chrome_options.add_argument("--ignore-certificate-errors")
+    chrome_options.add_argument("--no-first-run")
+    chrome_options.add_argument("--no-default-browser-check")
+    chrome_options.add_argument("--disable-background-timer-throttling")
+    chrome_options.add_argument("--disable-backgrounding-occluded-windows")
+    chrome_options.add_argument("--disable-renderer-backgrounding")
     chrome_options.add_argument("--remote-debugging-port=0")
-    chrome_options.add_argument("--disable-logging")
-    chrome_options.add_argument("--silent")
     chrome_options.add_argument(f"--user-agent={DEFAULT_USER_AGENT}")
-    chrome_options.add_experimental_option("excludeSwitches", ["enable-automation", "enable-logging"])
-    chrome_options.add_experimental_option("useAutomationExtension", False)
-    chrome_options.add_experimental_option("prefs", {
-        "profile.managed_default_content_settings.images": 2,
-        "profile.default_content_setting_values.notifications": 2,
-        "profile.default_content_settings.popups": 0,
-        "download.prompt_for_download": False,
-    })
+
+    if not use_uc:
+        chrome_options.add_experimental_option(
+            "excludeSwitches",
+            ["enable-automation", "enable-logging", "enable-blink-features=AutomationControlled"],
+        )
+        chrome_options.add_experimental_option("useAutomationExtension", False)
+    chrome_options.add_experimental_option(
+        "prefs",
+        {
+            "profile.managed_default_content_settings.images": 2,
+            "profile.default_content_setting_values.notifications": 2,
+            "profile.default_content_settings.popups": 0,
+            "download.prompt_for_download": False,
+        },
+    )
 
     import shutil
+    chrome_bin = None
     for candidate in ["/usr/bin/chromium-browser", "/usr/bin/google-chrome", "/usr/bin/chromium"]:
         if os.path.exists(candidate):
-            chrome_options.binary_location = candidate
+            chrome_bin = candidate
             break
+    if chrome_bin:
+        chrome_options.binary_location = chrome_bin
 
-    try:
-        if UC_AVAILABLE:
-            driver = uc.Chrome(options=chrome_options, headless=use_headless, version_main=128)
-        else:
-            cd_path = shutil.which("chromedriver") or "/usr/bin/chromedriver"
-            service = Service(executable_path=cd_path)
-            driver = webdriver.Chrome(service=service, options=chrome_options)
-    except Exception as e:
-        raise RuntimeError(f"Chrome init failed: {e}")
+    chromedriver_path = None
+    for candidate in ["/usr/bin/chromedriver", "/usr/lib/chromium-browser/chromedriver"]:
+        if os.path.exists(candidate):
+            chromedriver_path = candidate
+            break
+    if not chromedriver_path:
+        chromedriver_path = shutil.which("chromedriver")
+
+    driver = None
+    if use_uc:
+        try:
+            driver = uc.Chrome(options=chrome_options)
+        except Exception:
+            driver = None
+    if driver is None:
+        service = Service(executable_path=chromedriver_path) if chromedriver_path else Service()
+        driver = webdriver.Chrome(service=service, options=chrome_options)
 
     driver.set_page_load_timeout(60)
-    driver.set_window_size(1280, 720)
+    driver.set_window_size(1920, 1080)
     return driver
 
 
@@ -1629,4 +1658,10 @@ https://www.ebay.com/itm/123456789
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        import streamlit as st
+        st.error(f"❌ App Error: {e}")
+        st.code(traceback.format_exc())
+        st.stop()
