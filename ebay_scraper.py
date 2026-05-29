@@ -584,9 +584,10 @@ def _extract_links_from_page(driver):
 
     if not links:
         for selector in (
-            "a[href*='/itm/']",
             ".s-item a[href*='/itm/']",
+            ".b-list__items a[href*='/itm/']",
             ".s-result-item a[href*='/itm/']",
+            "a[href*='/itm/']",
         ):
             try:
                 for elem in driver.find_elements(By.CSS_SELECTOR, selector):
@@ -663,14 +664,14 @@ def get_all_product_links_http(store_url, on_progress=None, max_pages=500, sessi
                         break
                     continue
 
-            # Extract links: selectors first, then regex fallback
+            # Extract links: narrow selectors FIRST (main product grid only), broad fallback LAST
             for sel in (
-                "a[href*='/itm/']",
-                "a.s-item__link",
                 ".s-item a[href*='/itm/']",
                 ".b-list__items a[href*='/itm/']",
+                "a.s-item__link",
                 "a.vip",
-                "a[href*='itm']",
+                ".s-item a[href*='itm']",
+                "a[href*='/itm/']",
             ):
                 for a in soup.select(sel):
                     try:
@@ -685,9 +686,10 @@ def get_all_product_links_http(store_url, on_progress=None, max_pages=500, sessi
                 if page_links:
                     break
 
-            # Regex fallback
             if not page_links:
-                for m in re.finditer(r'https?://[^"\']*ebay[^"\']*/itm/[0-9]{7,}[^"\'\s<>]*', response.text):
+                product_area = soup.select_one(".srp-river-results, .b-list, [data-view*='mi:1683']")
+                haystack = str(product_area) if product_area else response.text
+                for m in re.finditer(r'https?://[^"\']*ebay[^"\']*/itm/[0-9]{7,}[^"\'\s<>]*', haystack):
                     href = m.group(0).split("?")[0]
                     if is_valid_item_link(href):
                         norm = normalize_url(href)
@@ -695,7 +697,8 @@ def get_all_product_links_http(store_url, on_progress=None, max_pages=500, sessi
                             all_links.add(norm)
                             page_links.append(norm)
                 if not page_links:
-                    for m in re.finditer(r'/itm/[0-9]{7,}[^"\'\s<>]*', response.text):
+                    haystack2 = str(product_area) if product_area else response.text
+                    for m in re.finditer(r'/itm/[0-9]{7,}[^"\'\s<>]*', haystack2):
                         href = "https://www.ebay.com" + m.group(0).split("?")[0]
                         if is_valid_item_link(href):
                             norm = normalize_url(href)
@@ -882,6 +885,9 @@ def _fill_from_json_ld(soup, data):
                         data["price"] = clean_price(str(offers["price"]))
                     elif isinstance(offers, list) and offers and isinstance(offers[0], dict):
                         data["price"] = clean_price(str(offers[0].get("price", "")))
+                if not data["seller"] and item.get("seller"):
+                    sel = item["seller"]
+                    data["seller"] = sel.get("name", "") if isinstance(sel, dict) else str(sel)
                 if not data["image"] and item.get("image"):
                     img = item["image"]
                     data["image"] = img[0] if isinstance(img, list) else str(img)
@@ -899,6 +905,7 @@ def _empty_product(url):
         "model": "",
         "image": "",
         "url": url,
+        "seller": "",
     }
 
 
@@ -970,6 +977,13 @@ def _extract_product_data(html, soup, url):
 
     _fill_specs_from_soup(soup, data)
     _fill_from_json_ld(soup, data)
+
+    if not data["seller"]:
+        for sel in ("span.vi-seller__name a", ".seller-info a", ".mbg a", "[data-testid='x-seller-text']"):
+            el = soup.select_one(sel)
+            if el:
+                data["seller"] = clean_text(el.get_text(" ", strip=True))
+                break
 
     if not data["price"]:
         for match in re.finditer(r"\$\s*([0-9,]+(?:\.[0-9]{2})?)", html):
@@ -1057,7 +1071,7 @@ def scrape_product(url, session=None, selenium_driver=None, selenium_lock=None, 
             session.close()
 
 
-def scrape_all_products(urls, selenium_driver=None, use_headless=True, max_workers=50, on_progress=None, session=None, timeout=840):
+def scrape_all_products(urls, selenium_driver=None, use_headless=True, max_workers=50, on_progress=None, session=None, timeout=840, expected_seller=None):
     if not urls:
         return []
     all_data = []
@@ -1102,8 +1116,11 @@ def scrape_all_products(urls, selenium_driver=None, use_headless=True, max_worke
                     item_id = extract_item_id(url)
                     with progress_lock:
                         progress["done"] += 1
-                        if data and data.get("title"):
-                            if item_id and item_id not in seen_items:
+                    if data and data.get("title"):
+                        if item_id and item_id not in seen_items:
+                            if expected_seller and data.get("seller") and expected_seller.lower() not in data["seller"].lower():
+                                pass
+                            else:
                                 seen_items.add(item_id)
                                 all_data.append(data)
                                 progress["scraped"] += 1
@@ -1154,7 +1171,7 @@ def _get_all_product_links_ui(store_url, driver, progress_bar, total_products=No
     )
 
 
-def _scrape_all_products_ui(urls, progress_bar, selenium_driver=None, use_headless=True, session=None, timeout=840):
+def _scrape_all_products_ui(urls, progress_bar, selenium_driver=None, use_headless=True, session=None, timeout=840, expected_seller=None):
     status_placeholder = st.empty()
     _t0 = time.time()
     _last_report_time = [0.0]
@@ -1188,6 +1205,7 @@ def _scrape_all_products_ui(urls, progress_bar, selenium_driver=None, use_headle
         on_progress=on_progress,
         session=session,
         timeout=timeout,
+        expected_seller=expected_seller,
     )
 
     progress_bar.progress(1.0, text=f"✅ Completed! Scraped {len(all_data)} products")
@@ -1289,7 +1307,7 @@ def main():
                     df = pd.DataFrame(scraped_data)
                     columns_order = [
                         "title", "price", "description", "part_num_mpn",
-                        "brand", "model", "image", "url",
+                        "brand", "model", "seller", "image", "url",
                     ]
                     df = df[columns_order]
 
@@ -1456,6 +1474,8 @@ def main():
                     pass
             return
 
+        expected_seller = get_seller_name_from_store_url(store_url) or ""
+
         with st.spinner("🔄 Scraping products... This may take a few minutes"):
             scrape_progress = st.progress(0, text="Starting product scraping...")
             scraped_data = []
@@ -1467,6 +1487,7 @@ def main():
                     selenium_driver=driver,
                     use_headless=headless,
                     session=http_session,
+                    expected_seller=expected_seller,
                 )
             except Exception as e:
                 st.warning(f"⚠️ Scraping interrupted: {str(e)[:100]}")
@@ -1489,7 +1510,7 @@ def main():
             df = pd.DataFrame(scraped_data)
             columns_order = [
                 "title", "price", "description", "part_num_mpn",
-                "brand", "model", "image", "url",
+                "brand", "model", "seller", "image", "url",
             ]
             df = df[columns_order]
 
