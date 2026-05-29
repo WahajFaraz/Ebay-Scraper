@@ -282,7 +282,7 @@ def get_driver(use_headless=True):
     chrome_options = uc.ChromeOptions() if use_uc else Options()
 
     if use_headless:
-        chrome_options.add_argument("--headless")
+        chrome_options.add_argument("--headless=new")
     chrome_options.add_argument("--window-size=1920,1080")
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
@@ -295,13 +295,17 @@ def get_driver(use_headless=True):
     chrome_options.add_argument("--disable-background-timer-throttling")
     chrome_options.add_argument("--disable-backgrounding-occluded-windows")
     chrome_options.add_argument("--disable-renderer-backgrounding")
+    chrome_options.add_argument("--disable-software-rasterizer")
     chrome_options.add_argument("--remote-debugging-port=0")
     chrome_options.add_argument(f"--user-agent={DEFAULT_USER_AGENT}")
+    chrome_options.add_argument("--disable-logging")
+    chrome_options.add_argument("--log-level=3")
+    chrome_options.add_argument("--silent")
 
     if not use_uc:
         chrome_options.add_experimental_option(
             "excludeSwitches",
-            ["enable-automation", "enable-logging", "enable-blink-features=AutomationControlled"],
+            ["enable-automation", "enable-logging"],
         )
         chrome_options.add_experimental_option("useAutomationExtension", False)
     chrome_options.add_experimental_option(
@@ -314,7 +318,6 @@ def get_driver(use_headless=True):
         },
     )
 
-    # Streamlit Cloud: locate chrome/chromedriver binaries
     import shutil
     chrome_bin = None
     for candidate in ["/usr/bin/chromium-browser", "/usr/bin/google-chrome", "/usr/bin/chromium"]:
@@ -333,16 +336,19 @@ def get_driver(use_headless=True):
         chromedriver_path = shutil.which("chromedriver")
 
     driver = None
-    if use_uc:
-        try:
-            driver = uc.Chrome(options=chrome_options)
-        except Exception:
-            driver = None
-    if driver is None:
-        service = Service(executable_path=chromedriver_path) if chromedriver_path else Service()
-        driver = webdriver.Chrome(service=service, options=chrome_options)
+    try:
+        if use_uc:
+            try:
+                driver = uc.Chrome(options=chrome_options, headless=use_headless)
+            except Exception:
+                driver = None
+        if driver is None:
+            service = Service(executable_path=chromedriver_path) if chromedriver_path else Service()
+            driver = webdriver.Chrome(service=service, options=chrome_options)
+    except Exception as e:
+        raise RuntimeError(f"Chrome init failed: {e}")
 
-    driver.set_page_load_timeout(10)
+    driver.set_page_load_timeout(30)
     driver.set_window_size(1920, 1080)
     return driver
 
@@ -1420,8 +1426,13 @@ def main():
         http_session = None
 
         if on_cloud:
-            st.info("☁️ **Streamlit Cloud Mode**: Using HTTP (browser not reliable on cloud)")
-            http_session = create_http_session()
+            st.info("☁️ **Streamlit Cloud Mode**: Attempting browser-based scraping...")
+            try:
+                driver = get_driver(use_headless=True)
+                st.success("✅ Browser initialized on cloud!")
+            except Exception as e:
+                st.warning(f"⚠️ Browser failed, using HTTP: {str(e)[:80]}")
+                http_session = create_http_session()
         elif mode != "Manual Links":
             with st.spinner("🔄 Initializing scraper..."):
                 try:
