@@ -65,9 +65,8 @@ def normalize_store_url(url):
         raise ValueError("URL must be an eBay link (ebay.com)")
 
     url = re.sub(r"[?&]_pgn=\d+", "", url)
+    url = re.sub(r"[?&]_ipg=\d+", "", url)
     url = url.rstrip("?&")
-    if is_ebay_store_url(url) and "_ipg=" not in url:
-        url += ("&" if "?" in url else "?") + "_ipg=240"
     return url
 
 
@@ -264,6 +263,11 @@ def find_first_nonblocked_http_url(url, session):
             if response.status_code != 200:
                 continue
             if is_blocked_page(response.text):
+                clean = re.sub(r"[?&]_ipg=\d+", "", candidate).rstrip("?&")
+                if clean != candidate:
+                    response = session.get(clean, timeout=10)
+                    if response.status_code == 200 and not is_blocked_page(response.text):
+                        return clean
                 continue
             return candidate
         except Exception:
@@ -338,22 +342,8 @@ def get_driver(use_headless=True):
         service = Service(executable_path=chromedriver_path) if chromedriver_path else Service()
         driver = webdriver.Chrome(service=service, options=chrome_options)
 
-    driver.set_page_load_timeout(15)
-    driver.set_script_timeout(25)
-    driver.implicitly_wait(3)
-
-    if not use_uc:
-        driver.execute_cdp_cmd(
-            "Page.addScriptToEvaluateOnNewDocument",
-            {
-                "source": (
-                    "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
-                    "window.navigator.chrome = {runtime: {}};"
-                )
-            },
-        )
-
-    warm_up_ebay_driver(driver)
+    driver.set_page_load_timeout(10)
+    driver.set_window_size(1920, 1080)
     return driver
 
 
@@ -647,17 +637,20 @@ def get_all_product_links_http(store_url, on_progress=None, max_pages=500, sessi
             soup = BeautifulSoup(response.text, "html.parser")
 
             if is_blocked_page(response.text, soup=soup):
-                for retry in range(3):
-                    time.sleep(2 + (retry * 2))
-                    response = session.get(url, timeout=20)
-                    if response.status_code != 200:
-                        continue
+                time.sleep(1)
+                response = session.get(url, timeout=10)
+                if response.status_code == 200:
                     soup = BeautifulSoup(response.text, "html.parser")
                     if not is_blocked_page(response.text, soup=soup):
-                        break
+                        pass
+                    else:
+                        no_change_counter += 2
+                        if no_change_counter >= 8:
+                            break
+                        continue
                 else:
-                    no_change_counter += 3
-                    if no_change_counter >= 9:
+                    no_change_counter += 2
+                    if no_change_counter >= 8:
                         break
                     continue
 
@@ -720,7 +713,7 @@ def get_all_product_links_http(store_url, on_progress=None, max_pages=500, sessi
             else:
                 no_change_counter = 0
 
-            time.sleep(0.3)
+            time.sleep(0.15)
         except Exception:
             continue
 
@@ -1052,7 +1045,7 @@ def scrape_product(url, session=None, selenium_driver=None, selenium_lock=None, 
             session.close()
 
 
-def filter_valid_links(urls, max_workers=50, expected_seller=""):
+def filter_valid_links(urls, max_workers=30, expected_seller=""):
     if not urls:
         return []
     valid = []
@@ -1062,7 +1055,7 @@ def filter_valid_links(urls, max_workers=50, expected_seller=""):
         try:
             s = requests.Session()
             s.headers.update({"User-Agent": DEFAULT_USER_AGENT})
-            resp = s.get(url, timeout=(3, 5))
+            resp = s.get(url, timeout=(2, 4))
             if resp.status_code != 200:
                 s.close()
                 return None
