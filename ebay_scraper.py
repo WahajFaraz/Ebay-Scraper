@@ -1,20 +1,16 @@
-# -*- coding: utf-8 -*-
 import os
-import sys
 import re
 import json
 import math
 import time
 import threading
-import traceback
 import requests
+import streamlit as st
 import pandas as pd
 from io import BytesIO
 from bs4 import BeautifulSoup
 from urllib.parse import urlparse, parse_qs, quote_plus
 from concurrent.futures import ThreadPoolExecutor, as_completed, wait
-
-import streamlit as st
 
 try:
     from selenium import webdriver
@@ -69,8 +65,9 @@ def normalize_store_url(url):
         raise ValueError("URL must be an eBay link (ebay.com)")
 
     url = re.sub(r"[?&]_pgn=\d+", "", url)
-    url = re.sub(r"[?&]_ipg=\d+", "", url)
     url = url.rstrip("?&")
+    if is_ebay_store_url(url) and "_ipg=" not in url:
+        url += ("&" if "?" in url else "?") + "_ipg=240"
     return url
 
 
@@ -144,8 +141,16 @@ def clean_price(value):
 
 
 def create_http_session():
+    from requests.adapters import Retry
+    
     session = requests.Session()
-    adapter = requests.adapters.HTTPAdapter(pool_connections=100, pool_maxsize=100)
+    retry_strategy = Retry(
+        total=5,
+        status_forcelist=[429, 500, 502, 503, 504],
+        allowed_methods=["GET", "HEAD"],
+        backoff_factor=1.2,
+    )
+    adapter = requests.adapters.HTTPAdapter(max_retries=retry_strategy, pool_connections=100, pool_maxsize=100)
     session.mount("http://", adapter)
     session.mount("https://", adapter)
     
@@ -258,31 +263,19 @@ def get_search_fallback_urls(store_url):
 
 def find_first_nonblocked_http_url(url, session):
     candidates = [url]
-    seller = get_seller_name_from_store_url(url)
     if is_ebay_store_url(url):
         candidates.extend([u for u in get_search_fallback_urls(url) if u])
-    candidates.append(f"https://www.ebay.com/sch/i.html?_nkw=&_saslop=1&_sasl={seller}&_ipg=60" if seller else None)
-    candidates = [c for c in candidates if c]
-
-    for candidate in candidates[:4]:
-        for attempt in range(2):
-            try:
-                response = session.get(candidate, timeout=10)
-                if response.status_code != 200:
-                    time.sleep(1)
-                    continue
-                if is_blocked_page(response.text):
-                    clean = re.sub(r"[?&]_ipg=\d+", "", candidate).rstrip("?&")
-                    if clean != candidate:
-                        response = session.get(clean, timeout=10)
-                        if response.status_code == 200 and not is_blocked_page(response.text):
-                            return clean
-                    time.sleep(1)
-                    continue
-                return candidate
-            except Exception:
-                time.sleep(1)
+    
+    for candidate in candidates:
+        try:
+            response = session.get(candidate, timeout=20)
+            if response.status_code != 200:
                 continue
+            if is_blocked_page(response.text):
+                continue
+            return candidate
+        except Exception:
+            continue
     return None
 
 
@@ -292,7 +285,8 @@ def get_driver(use_headless=True):
     use_uc = UC_AVAILABLE and os.environ.get("USE_UC", "0") == "1"
     chrome_options = uc.ChromeOptions() if use_uc else Options()
 
-    chrome_options.add_argument("--headless")
+    if use_headless:
+        chrome_options.add_argument("--headless")
     chrome_options.add_argument("--window-size=1920,1080")
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
@@ -324,6 +318,7 @@ def get_driver(use_headless=True):
         },
     )
 
+    # Streamlit Cloud: locate chrome/chromedriver binaries
     import shutil
     chrome_bin = None
     for candidate in ["/usr/bin/chromium-browser", "/usr/bin/google-chrome", "/usr/bin/chromium"]:
@@ -351,8 +346,22 @@ def get_driver(use_headless=True):
         service = Service(executable_path=chromedriver_path) if chromedriver_path else Service()
         driver = webdriver.Chrome(service=service, options=chrome_options)
 
-    driver.set_page_load_timeout(60)
-    driver.set_window_size(1920, 1080)
+    driver.set_page_load_timeout(45)
+    driver.set_script_timeout(25)
+    driver.implicitly_wait(3)
+
+    if not use_uc:
+        driver.execute_cdp_cmd(
+            "Page.addScriptToEvaluateOnNewDocument",
+            {
+                "source": (
+                    "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
+                    "window.navigator.chrome = {runtime: {}};"
+                )
+            },
+        )
+
+    warm_up_ebay_driver(driver)
     return driver
 
 
@@ -567,12 +576,6 @@ def _extract_links_from_page(driver):
     try:
         for item in driver.find_elements(By.CSS_SELECTOR, "a.s-item__link"):
             try:
-                parent = item.find_element(By.XPATH, "./ancestor::*[contains(@class, 's-item--sponsored')]")
-                if parent:
-                    continue
-            except Exception:
-                pass
-            try:
                 add_link(item.get_attribute("href"))
             except Exception:
                 continue
@@ -581,9 +584,10 @@ def _extract_links_from_page(driver):
 
     if not links:
         for selector in (
-            ".s-item:not(.s-item--sponsored) a[href*='/itm/']",
+            ".s-item a[href*='/itm/']",
             ".b-list__items a[href*='/itm/']",
             ".s-result-item a[href*='/itm/']",
+            "a[href*='/itm/']",
         ):
             try:
                 for elem in driver.find_elements(By.CSS_SELECTOR, selector):
@@ -646,35 +650,31 @@ def get_all_product_links_http(store_url, on_progress=None, max_pages=500, sessi
             soup = BeautifulSoup(response.text, "html.parser")
 
             if is_blocked_page(response.text, soup=soup):
-                time.sleep(1)
-                response = session.get(url, timeout=10)
-                if response.status_code == 200:
+                for retry in range(3):
+                    time.sleep(2 + (retry * 2))
+                    response = session.get(url, timeout=20)
+                    if response.status_code != 200:
+                        continue
                     soup = BeautifulSoup(response.text, "html.parser")
                     if not is_blocked_page(response.text, soup=soup):
-                        pass
-                    else:
-                        no_change_counter += 2
-                        if no_change_counter >= 8:
-                            break
-                        continue
+                        break
                 else:
-                    no_change_counter += 2
-                    if no_change_counter >= 8:
+                    no_change_counter += 3
+                    if no_change_counter >= 9:
                         break
                     continue
 
+            # Extract links: narrow selectors FIRST (main product grid only), broad fallback LAST
             for sel in (
-                ".s-item:not(.s-item--sponsored) a[href*='/itm/']",
+                ".s-item a[href*='/itm/']",
                 ".b-list__items a[href*='/itm/']",
                 "a.s-item__link",
                 "a.vip",
                 ".s-item a[href*='itm']",
+                "a[href*='/itm/']",
             ):
                 for a in soup.select(sel):
                     try:
-                        parent = a.find_parent(class_="s-item--sponsored")
-                        if parent:
-                            continue
                         href = a.get("href", "")
                         if is_valid_item_link(href):
                             norm = normalize_url(href)
@@ -722,7 +722,7 @@ def get_all_product_links_http(store_url, on_progress=None, max_pages=500, sessi
             else:
                 no_change_counter = 0
 
-            time.sleep(0.15)
+            time.sleep(0.3)
         except Exception:
             continue
 
@@ -1031,95 +1031,59 @@ def scrape_product(url, session=None, selenium_driver=None, selenium_lock=None, 
         own_session = True
 
     try:
-        response = session.get(url, timeout=(3, 8))
-        if debug:
-            print(f"[DEBUG] URL: {url} | Status: {response.status_code}")
-        if response.status_code != 200:
-            return None
-        html = response.text
-        soup = BeautifulSoup(html, "html.parser")
-        if is_blocked_page(html, soup=soup):
-            if selenium_driver is not None:
-                if selenium_lock is not None:
-                    with selenium_lock:
+        for attempt in range(3):
+            try:
+                response = session.get(url, timeout=15)
+                if debug and attempt == 0:
+                    print(f"[DEBUG] URL: {url} | Status: {response.status_code}")
+                if response.status_code != 200:
+                    if attempt < 2:
+                        time.sleep(0.3)
+                        continue
+                    return None
+                html = response.text
+                soup = BeautifulSoup(html, "html.parser")
+                if is_blocked_page(html, soup=soup):
+                    if attempt < 1:
+                        time.sleep(0.5)
+                        continue
+                    if selenium_driver is not None:
+                        if selenium_lock is not None:
+                            with selenium_lock:
+                                return _scrape_product_with_selenium(url, selenium_driver, debug=debug)
                         return _scrape_product_with_selenium(url, selenium_driver, debug=debug)
-                return _scrape_product_with_selenium(url, selenium_driver, debug=debug)
-            return None
-        data = _extract_product_data(html, soup, url)
-        return data
-    except Exception:
+                    return None
+                data = _extract_product_data(html, soup, url)
+                if data:
+                    return data
+                if attempt < 2:
+                    time.sleep(0.2)
+                    continue
+                return None
+            except Exception:
+                if attempt < 2:
+                    time.sleep(0.3)
+                    continue
+                return None
         return None
     finally:
         if own_session:
             session.close()
 
 
-def filter_valid_links(urls, max_workers=30, expected_seller=""):
-    if not urls:
-        return []
-    valid = []
-    lock = threading.Lock()
-
-    def check(url):
-        try:
-            s = requests.Session()
-            s.headers.update({"User-Agent": DEFAULT_USER_AGENT})
-            resp = s.get(url, timeout=(2, 4))
-            if resp.status_code != 200:
-                s.close()
-                return None
-            soup = BeautifulSoup(resp.text, "html.parser")
-            if is_blocked_page(resp.text, soup=soup):
-                s.close()
-                return None
-            has_title = bool(
-                soup.select_one("meta[property='og:title']")
-                or soup.select_one("h1#itemTitle")
-                or soup.select_one("h1[itemprop='name']")
-            )
-            has_price = bool(
-                soup.select_one("meta[property='product:price:amount']")
-                or soup.select_one("span#prcIsum")
-                or soup.select_one(".x-price-primary")
-            )
-            if not (has_title or has_price):
-                s.close()
-                return None
-            if expected_seller:
-                seller_el = soup.select_one("span.vi-seller__name a, .seller-info a, .mbg a, [data-testid='x-seller-text']")
-                if seller_el:
-                    seller_name = seller_el.get_text(" ", strip=True)
-                    if expected_seller.lower() not in seller_name.lower():
-                        s.close()
-                        return None
-            s.close()
-            return normalize_url(url)
-        except Exception:
-            return None
-
-    with ThreadPoolExecutor(max_workers=max_workers) as ex:
-        futures = {ex.submit(check, url): url for url in urls}
-        for f in as_completed(futures):
-            result = f.result()
-            if result:
-                with lock:
-                    valid.append(result)
-    return valid
-
-
-def scrape_all_products(urls, selenium_driver=None, use_headless=True, max_workers=50, on_progress=None, session=None, timeout=300, expected_seller=None):
+def scrape_all_products(urls, selenium_driver=None, use_headless=True, max_workers=50, on_progress=None, session=None, timeout=840, expected_seller=None):
     if not urls:
         return []
     all_data = []
     seen_items = set()
     total = len(urls)
-    progress = {"done": 0, "scraped": 0, "invalid": 0, "other_seller": 0, "last_report": 0}
+    progress = {"done": 0, "scraped": 0, "last_report": 0}
     progress_lock = threading.Lock()
     start_time = time.time()
 
     def report():
         if on_progress:
-            on_progress(progress["done"], total, progress["scraped"], progress["invalid"], progress["other_seller"])
+            on_progress(progress["done"], total, progress["scraped"])
 
     selenium_lock = threading.Lock()
     _thread_local = threading.local()
@@ -1142,36 +1106,24 @@ def scrape_all_products(urls, selenium_driver=None, use_headless=True, max_worke
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {executor.submit(scrape_request, url): url for url in urls}
         pending = set(futures.keys())
-        stuck_count = 0
         while pending:
             elapsed = time.time() - start_time
             remaining = max(timeout - elapsed, 0)
-            done, pending = wait(pending, timeout=min(remaining, 10))
-            if not done:
-                stuck_count += 1
-                if stuck_count >= 60:
-                    for f in pending:
-                        f.cancel()
-                    break
-                continue
-            stuck_count = 0
+            done, pending = wait(pending, timeout=min(remaining, 5))
             for future in done:
                 try:
-                    url, data = future.result(timeout=5)
+                    url, data = future.result()
                     item_id = extract_item_id(url)
                     with progress_lock:
                         progress["done"] += 1
                     if data and data.get("title"):
                         if item_id and item_id not in seen_items:
                             if expected_seller and data.get("seller") and expected_seller.lower() not in data["seller"].lower():
-                                progress["other_seller"] += 1
+                                pass
                             else:
                                 seen_items.add(item_id)
                                 all_data.append(data)
                                 progress["scraped"] += 1
-                    else:
-                        progress["invalid"] += 1
-                    with progress_lock:
                         progress["last_report"] += 1
                         if progress["last_report"] >= 5 or progress["done"] == total:
                             progress["last_report"] = 0
@@ -1192,6 +1144,17 @@ def scrape_all_products(urls, selenium_driver=None, use_headless=True, max_worke
             on_progress(progress["done"], total, progress["scraped"])
     return all_data
 
+st.set_page_config(
+    page_title="eBay Store Scraper",
+    page_icon="🛒",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+
+st.title("🛒 eBay Store Scraper")
+st.markdown("---")
+
+
 def _get_all_product_links_ui(store_url, driver, progress_bar, total_products=None):
     def on_progress(page, max_pages, found, new_items, total_links):
         progress_ratio = min(page / max(max_pages, 1), 1.0)
@@ -1208,12 +1171,12 @@ def _get_all_product_links_ui(store_url, driver, progress_bar, total_products=No
     )
 
 
-def _scrape_all_products_ui(urls, progress_bar, selenium_driver=None, use_headless=True, session=None, timeout=300, expected_seller=None):
+def _scrape_all_products_ui(urls, progress_bar, selenium_driver=None, use_headless=True, session=None, timeout=840, expected_seller=None):
     status_placeholder = st.empty()
     _t0 = time.time()
     _last_report_time = [0.0]
 
-    def on_progress(done, total, scraped_count, invalid=0, other_seller=0):
+    def on_progress(done, total, scraped_count):
         now = time.time()
         if done > 0 and done < total and done % 10 != 0 and (now - _last_report_time[0]) < 3:
             return
@@ -1228,14 +1191,9 @@ def _scrape_all_products_ui(urls, progress_bar, selenium_driver=None, use_headle
             progress_ratio,
             text=f"Scraping... {scraped_count}/{total} products ({pct}%)"
         )
-        extra = ""
-        if invalid:
-            extra += f" • ❌ {invalid} invalid"
-        if other_seller:
-            extra += f" • 🏪 {other_seller} other seller"
         status_placeholder.markdown(
             f"**Processed:** {min(done, total)} / {total}  \n"
-            f"**Saved:** {scraped_count}{extra}  \n"
+            f"**Saved:** {scraped_count}  \n"
             f"**Speed:** {speed}/sec • **ETA:** {eta_str}"
         )
 
@@ -1286,14 +1244,6 @@ def is_streamlit_cloud():
 
 
 def main():
-    st.set_page_config(
-        page_title="eBay Store Scraper",
-        page_icon="🛒",
-        layout="wide",
-        initial_sidebar_state="expanded",
-    )
-    st.title("🛒 eBay Store Scraper")
-    st.markdown("---")
     st.sidebar.header("🔧 Scraper Settings")
 
     on_cloud = is_streamlit_cloud()
@@ -1431,7 +1381,7 @@ def main():
                 driver = get_driver(use_headless=True)
                 st.success("✅ Browser initialized on cloud!")
             except Exception as e:
-                st.warning(f"⚠️ Browser failed, using HTTP: {str(e)[:80]}")
+                st.warning(f"⚠️ Browser unavailable on cloud, falling back to HTTP: {str(e)[:100]}")
                 http_session = create_http_session()
         elif mode != "Manual Links":
             with st.spinner("🔄 Initializing scraper..."):
@@ -1490,15 +1440,6 @@ def main():
                 on_progress=on_http_progress,
                 session=http_session,
             )
-            if not all_links:
-                links_progress.progress(0.5, text="First attempt blocked, retrying with fresh session...")
-                time.sleep(2)
-                http_session = create_http_session()
-                all_links = get_all_product_links_http(
-                    store_url,
-                    on_progress=on_http_progress,
-                    session=http_session,
-                )
             links_progress.progress(1.0, text=f"Found {len(all_links):,} product links")
             if all_links:
                 st.success(f"🔗 Product Links Collected: {len(all_links):,}")
@@ -1534,14 +1475,6 @@ def main():
             return
 
         expected_seller = get_seller_name_from_store_url(store_url) or ""
-
-        if len(all_links) > 200:
-            validate_progress = st.progress(0.5, text=f"🔍 Validating {len(all_links):,} links...")
-            valid_links = filter_valid_links(all_links, expected_seller=expected_seller)
-            validate_progress.progress(1.0, text=f"✅ {len(valid_links):,} valid product links found")
-            if len(valid_links) < len(all_links):
-                st.info(f"🚀 Skipped {len(all_links) - len(valid_links):,} invalid/dead links — scraping only {len(valid_links):,} real products")
-            all_links = valid_links
 
         with st.spinner("🔄 Scraping products... This may take a few minutes"):
             scrape_progress = st.progress(0, text="Starting product scraping...")
@@ -1655,9 +1588,4 @@ https://www.ebay.com/itm/123456789
 
 
 if __name__ == "__main__":
-    try:
-        main()
-    except Exception as e:
-        st.error(f"❌ App Error: {e}")
-        st.code(traceback.format_exc())
-        st.stop()
+    main()
