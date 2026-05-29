@@ -254,102 +254,76 @@ def get_search_fallback_urls(store_url):
 
 def find_first_nonblocked_http_url(url, session):
     candidates = [url]
+    seller = get_seller_name_from_store_url(url)
     if is_ebay_store_url(url):
         candidates.extend([u for u in get_search_fallback_urls(url) if u])
-    
-    for candidate in candidates[:2]:
-        try:
-            response = session.get(candidate, timeout=10)
-            if response.status_code != 200:
+    candidates.append(f"https://www.ebay.com/sch/i.html?_nkw=&_saslop=1&_sasl={seller}&_ipg=60" if seller else None)
+    candidates = [c for c in candidates if c]
+
+    for candidate in candidates[:4]:
+        for attempt in range(2):
+            try:
+                response = session.get(candidate, timeout=10)
+                if response.status_code != 200:
+                    time.sleep(1)
+                    continue
+                if is_blocked_page(response.text):
+                    clean = re.sub(r"[?&]_ipg=\d+", "", candidate).rstrip("?&")
+                    if clean != candidate:
+                        response = session.get(clean, timeout=10)
+                        if response.status_code == 200 and not is_blocked_page(response.text):
+                            return clean
+                    time.sleep(1)
+                    continue
+                return candidate
+            except Exception:
+                time.sleep(1)
                 continue
-            if is_blocked_page(response.text):
-                clean = re.sub(r"[?&]_ipg=\d+", "", candidate).rstrip("?&")
-                if clean != candidate:
-                    response = session.get(clean, timeout=10)
-                    if response.status_code == 200 and not is_blocked_page(response.text):
-                        return clean
-                continue
-            return candidate
-        except Exception:
-            continue
     return None
 
 
 def get_driver(use_headless=True):
     if not SELENIUM_AVAILABLE:
         raise RuntimeError("Selenium is not installed")
-    use_uc = UC_AVAILABLE and os.environ.get("USE_UC", "0") == "1"
-    chrome_options = uc.ChromeOptions() if use_uc else Options()
 
-    if use_headless:
-        chrome_options.add_argument("--headless=new")
-    chrome_options.add_argument("--window-size=1920,1080")
+    chrome_options = uc.ChromeOptions() if UC_AVAILABLE else Options()
+    chrome_options.add_argument("--headless")
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
-    chrome_options.add_argument("--disable-blink-features=AutomationControlled")
-    chrome_options.add_argument("--disable-extensions")
     chrome_options.add_argument("--disable-gpu")
-    chrome_options.add_argument("--ignore-certificate-errors")
-    chrome_options.add_argument("--no-first-run")
-    chrome_options.add_argument("--no-default-browser-check")
-    chrome_options.add_argument("--disable-background-timer-throttling")
-    chrome_options.add_argument("--disable-backgrounding-occluded-windows")
-    chrome_options.add_argument("--disable-renderer-backgrounding")
     chrome_options.add_argument("--disable-software-rasterizer")
+    chrome_options.add_argument("--window-size=1280,720")
     chrome_options.add_argument("--remote-debugging-port=0")
-    chrome_options.add_argument(f"--user-agent={DEFAULT_USER_AGENT}")
     chrome_options.add_argument("--disable-logging")
-    chrome_options.add_argument("--log-level=3")
     chrome_options.add_argument("--silent")
-
-    if not use_uc:
-        chrome_options.add_experimental_option(
-            "excludeSwitches",
-            ["enable-automation", "enable-logging"],
-        )
-        chrome_options.add_experimental_option("useAutomationExtension", False)
-    chrome_options.add_experimental_option(
-        "prefs",
-        {
-            "profile.managed_default_content_settings.images": 2,
-            "profile.default_content_setting_values.notifications": 2,
-            "profile.default_content_settings.popups": 0,
-            "download.prompt_for_download": False,
-        },
-    )
+    chrome_options.add_argument(f"--user-agent={DEFAULT_USER_AGENT}")
+    chrome_options.add_experimental_option("excludeSwitches", ["enable-automation", "enable-logging"])
+    chrome_options.add_experimental_option("useAutomationExtension", False)
+    chrome_options.add_experimental_option("prefs", {
+        "profile.managed_default_content_settings.images": 2,
+        "profile.default_content_setting_values.notifications": 2,
+        "profile.default_content_settings.popups": 0,
+        "download.prompt_for_download": False,
+    })
 
     import shutil
-    chrome_bin = None
     for candidate in ["/usr/bin/chromium-browser", "/usr/bin/google-chrome", "/usr/bin/chromium"]:
         if os.path.exists(candidate):
-            chrome_bin = candidate
+            chrome_options.binary_location = candidate
             break
-    if chrome_bin:
-        chrome_options.binary_location = chrome_bin
 
-    chromedriver_path = None
-    for candidate in ["/usr/bin/chromedriver", "/usr/lib/chromium-browser/chromedriver"]:
-        if os.path.exists(candidate):
-            chromedriver_path = candidate
-            break
-    if not chromedriver_path:
-        chromedriver_path = shutil.which("chromedriver")
-
-    driver = None
     try:
-        if use_uc:
-            try:
-                driver = uc.Chrome(options=chrome_options, headless=use_headless)
-            except Exception:
-                driver = None
-        if driver is None:
-            service = Service(executable_path=chromedriver_path) if chromedriver_path else Service()
+        if UC_AVAILABLE:
+            driver = uc.Chrome(options=chrome_options, headless=use_headless, version_main=128)
+        else:
+            cd_path = shutil.which("chromedriver") or "/usr/bin/chromedriver"
+            service = Service(executable_path=cd_path)
             driver = webdriver.Chrome(service=service, options=chrome_options)
     except Exception as e:
         raise RuntimeError(f"Chrome init failed: {e}")
 
-    driver.set_page_load_timeout(30)
-    driver.set_window_size(1920, 1080)
+    driver.set_page_load_timeout(60)
+    driver.set_window_size(1280, 720)
     return driver
 
 
@@ -1490,6 +1464,15 @@ def main():
                 on_progress=on_http_progress,
                 session=http_session,
             )
+            if not all_links:
+                links_progress.progress(0.5, text="First attempt blocked, retrying with fresh session...")
+                time.sleep(2)
+                http_session = create_http_session()
+                all_links = get_all_product_links_http(
+                    store_url,
+                    on_progress=on_http_progress,
+                    session=http_session,
+                )
             links_progress.progress(1.0, text=f"Found {len(all_links):,} product links")
             if all_links:
                 st.success(f"🔗 Product Links Collected: {len(all_links):,}")
