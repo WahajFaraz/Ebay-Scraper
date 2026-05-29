@@ -1029,47 +1029,83 @@ def scrape_product(url, session=None, selenium_driver=None, selenium_lock=None, 
         own_session = True
 
     try:
-        for attempt in range(2):
-            try:
-                response = session.get(url, timeout=(5, 10))
-                if debug and attempt == 0:
-                    print(f"[DEBUG] URL: {url} | Status: {response.status_code}")
-                if response.status_code != 200:
-                    if attempt < 1:
-                        time.sleep(0.3)
-                        continue
-                    return None
-                html = response.text
-                soup = BeautifulSoup(html, "html.parser")
-                if is_blocked_page(html, soup=soup):
-                    if attempt < 1:
-                        time.sleep(0.5)
-                        continue
-                    if selenium_driver is not None:
-                        if selenium_lock is not None:
-                            with selenium_lock:
-                                return _scrape_product_with_selenium(url, selenium_driver, debug=debug)
+        response = session.get(url, timeout=(3, 8))
+        if debug:
+            print(f"[DEBUG] URL: {url} | Status: {response.status_code}")
+        if response.status_code != 200:
+            return None
+        html = response.text
+        soup = BeautifulSoup(html, "html.parser")
+        if is_blocked_page(html, soup=soup):
+            if selenium_driver is not None:
+                if selenium_lock is not None:
+                    with selenium_lock:
                         return _scrape_product_with_selenium(url, selenium_driver, debug=debug)
-                    return None
-                data = _extract_product_data(html, soup, url)
-                if data:
-                    return data
-                if attempt < 1:
-                    time.sleep(0.2)
-                    continue
-                return None
-            except Exception:
-                if attempt < 1:
-                    time.sleep(0.3)
-                    continue
-                return None
+                return _scrape_product_with_selenium(url, selenium_driver, debug=debug)
+            return None
+        data = _extract_product_data(html, soup, url)
+        return data
+    except Exception:
         return None
     finally:
         if own_session:
             session.close()
 
 
-def scrape_all_products(urls, selenium_driver=None, use_headless=True, max_workers=30, on_progress=None, session=None, timeout=840, expected_seller=None):
+def filter_valid_links(urls, max_workers=50, expected_seller=""):
+    if not urls:
+        return []
+    valid = []
+    lock = threading.Lock()
+
+    def check(url):
+        try:
+            s = requests.Session()
+            s.headers.update({"User-Agent": DEFAULT_USER_AGENT})
+            resp = s.get(url, timeout=(3, 5))
+            if resp.status_code != 200:
+                s.close()
+                return None
+            soup = BeautifulSoup(resp.text, "html.parser")
+            if is_blocked_page(resp.text, soup=soup):
+                s.close()
+                return None
+            has_title = bool(
+                soup.select_one("meta[property='og:title']")
+                or soup.select_one("h1#itemTitle")
+                or soup.select_one("h1[itemprop='name']")
+            )
+            has_price = bool(
+                soup.select_one("meta[property='product:price:amount']")
+                or soup.select_one("span#prcIsum")
+                or soup.select_one(".x-price-primary")
+            )
+            if not (has_title or has_price):
+                s.close()
+                return None
+            if expected_seller:
+                seller_el = soup.select_one("span.vi-seller__name a, .seller-info a, .mbg a, [data-testid='x-seller-text']")
+                if seller_el:
+                    seller_name = seller_el.get_text(" ", strip=True)
+                    if expected_seller.lower() not in seller_name.lower():
+                        s.close()
+                        return None
+            s.close()
+            return normalize_url(url)
+        except Exception:
+            return None
+
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        futures = {ex.submit(check, url): url for url in urls}
+        for f in as_completed(futures):
+            result = f.result()
+            if result:
+                with lock:
+                    valid.append(result)
+    return valid
+
+
+def scrape_all_products(urls, selenium_driver=None, use_headless=True, max_workers=50, on_progress=None, session=None, timeout=300, expected_seller=None):
     if not urls:
         return []
     all_data = []
@@ -1111,7 +1147,7 @@ def scrape_all_products(urls, selenium_driver=None, use_headless=True, max_worke
             done, pending = wait(pending, timeout=min(remaining, 10))
             if not done:
                 stuck_count += 1
-                if stuck_count >= 30:
+                if stuck_count >= 60:
                     for f in pending:
                         f.cancel()
                     break
@@ -1181,7 +1217,7 @@ def _get_all_product_links_ui(store_url, driver, progress_bar, total_products=No
     )
 
 
-def _scrape_all_products_ui(urls, progress_bar, selenium_driver=None, use_headless=True, session=None, timeout=840, expected_seller=None):
+def _scrape_all_products_ui(urls, progress_bar, selenium_driver=None, use_headless=True, session=None, timeout=300, expected_seller=None):
     status_placeholder = st.empty()
     _t0 = time.time()
     _last_report_time = [0.0]
@@ -1216,7 +1252,7 @@ def _scrape_all_products_ui(urls, progress_bar, selenium_driver=None, use_headle
         urls,
         selenium_driver=selenium_driver,
         use_headless=use_headless,
-        max_workers=30,
+        max_workers=50,
         on_progress=on_progress,
         session=session,
         timeout=timeout,
@@ -1490,6 +1526,14 @@ def main():
             return
 
         expected_seller = get_seller_name_from_store_url(store_url) or ""
+
+        if len(all_links) > 200:
+            validate_progress = st.progress(0.5, text=f"🔍 Validating {len(all_links):,} links...")
+            valid_links = filter_valid_links(all_links, expected_seller=expected_seller)
+            validate_progress.progress(1.0, text=f"✅ {len(valid_links):,} valid product links found")
+            if len(valid_links) < len(all_links):
+                st.info(f"🚀 Skipped {len(all_links) - len(valid_links):,} invalid/dead links — scraping only {len(valid_links):,} real products")
+            all_links = valid_links
 
         with st.spinner("🔄 Scraping products... This may take a few minutes"):
             scrape_progress = st.progress(0, text="Starting product scraping...")
