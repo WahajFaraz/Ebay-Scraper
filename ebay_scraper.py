@@ -1029,13 +1029,13 @@ def scrape_product(url, session=None, selenium_driver=None, selenium_lock=None, 
         own_session = True
 
     try:
-        for attempt in range(3):
+        for attempt in range(2):
             try:
-                response = session.get(url, timeout=15)
+                response = session.get(url, timeout=(5, 10))
                 if debug and attempt == 0:
                     print(f"[DEBUG] URL: {url} | Status: {response.status_code}")
                 if response.status_code != 200:
-                    if attempt < 2:
+                    if attempt < 1:
                         time.sleep(0.3)
                         continue
                     return None
@@ -1054,12 +1054,12 @@ def scrape_product(url, session=None, selenium_driver=None, selenium_lock=None, 
                 data = _extract_product_data(html, soup, url)
                 if data:
                     return data
-                if attempt < 2:
+                if attempt < 1:
                     time.sleep(0.2)
                     continue
                 return None
             except Exception:
-                if attempt < 2:
+                if attempt < 1:
                     time.sleep(0.3)
                     continue
                 return None
@@ -1069,19 +1069,19 @@ def scrape_product(url, session=None, selenium_driver=None, selenium_lock=None, 
             session.close()
 
 
-def scrape_all_products(urls, selenium_driver=None, use_headless=True, max_workers=50, on_progress=None, session=None, timeout=840, expected_seller=None):
+def scrape_all_products(urls, selenium_driver=None, use_headless=True, max_workers=30, on_progress=None, session=None, timeout=840, expected_seller=None):
     if not urls:
         return []
     all_data = []
     seen_items = set()
     total = len(urls)
-    progress = {"done": 0, "scraped": 0, "last_report": 0}
+    progress = {"done": 0, "scraped": 0, "invalid": 0, "other_seller": 0, "last_report": 0}
     progress_lock = threading.Lock()
     start_time = time.time()
 
     def report():
         if on_progress:
-            on_progress(progress["done"], total, progress["scraped"])
+            on_progress(progress["done"], total, progress["scraped"], progress["invalid"], progress["other_seller"])
 
     selenium_lock = threading.Lock()
     _thread_local = threading.local()
@@ -1108,10 +1108,10 @@ def scrape_all_products(urls, selenium_driver=None, use_headless=True, max_worke
         while pending:
             elapsed = time.time() - start_time
             remaining = max(timeout - elapsed, 0)
-            done, pending = wait(pending, timeout=min(remaining, 5))
+            done, pending = wait(pending, timeout=min(remaining, 10))
             if not done:
                 stuck_count += 1
-                if stuck_count >= 6:
+                if stuck_count >= 30:
                     for f in pending:
                         f.cancel()
                     break
@@ -1126,11 +1126,13 @@ def scrape_all_products(urls, selenium_driver=None, use_headless=True, max_worke
                     if data and data.get("title"):
                         if item_id and item_id not in seen_items:
                             if expected_seller and data.get("seller") and expected_seller.lower() not in data["seller"].lower():
-                                pass
+                                progress["other_seller"] += 1
                             else:
                                 seen_items.add(item_id)
                                 all_data.append(data)
                                 progress["scraped"] += 1
+                    else:
+                        progress["invalid"] += 1
                     with progress_lock:
                         progress["last_report"] += 1
                         if progress["last_report"] >= 5 or progress["done"] == total:
@@ -1184,7 +1186,7 @@ def _scrape_all_products_ui(urls, progress_bar, selenium_driver=None, use_headle
     _t0 = time.time()
     _last_report_time = [0.0]
 
-    def on_progress(done, total, scraped_count):
+    def on_progress(done, total, scraped_count, invalid=0, other_seller=0):
         now = time.time()
         if done > 0 and done < total and done % 10 != 0 and (now - _last_report_time[0]) < 3:
             return
@@ -1199,9 +1201,14 @@ def _scrape_all_products_ui(urls, progress_bar, selenium_driver=None, use_headle
             progress_ratio,
             text=f"Scraping... {scraped_count}/{total} products ({pct}%)"
         )
+        extra = ""
+        if invalid:
+            extra += f" • ❌ {invalid} invalid"
+        if other_seller:
+            extra += f" • 🏪 {other_seller} other seller"
         status_placeholder.markdown(
             f"**Processed:** {min(done, total)} / {total}  \n"
-            f"**Saved:** {scraped_count}  \n"
+            f"**Saved:** {scraped_count}{extra}  \n"
             f"**Speed:** {speed}/sec • **ETA:** {eta_str}"
         )
 
@@ -1209,7 +1216,7 @@ def _scrape_all_products_ui(urls, progress_bar, selenium_driver=None, use_headle
         urls,
         selenium_driver=selenium_driver,
         use_headless=use_headless,
-        max_workers=50,
+        max_workers=30,
         on_progress=on_progress,
         session=session,
         timeout=timeout,
