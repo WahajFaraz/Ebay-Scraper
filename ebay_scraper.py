@@ -258,9 +258,9 @@ def find_first_nonblocked_http_url(url, session):
     if is_ebay_store_url(url):
         candidates.extend([u for u in get_search_fallback_urls(url) if u])
     
-    for candidate in candidates:
+    for candidate in candidates[:2]:
         try:
-            response = session.get(candidate, timeout=20)
+            response = session.get(candidate, timeout=10)
             if response.status_code != 200:
                 continue
             if is_blocked_page(response.text):
@@ -338,7 +338,7 @@ def get_driver(use_headless=True):
         service = Service(executable_path=chromedriver_path) if chromedriver_path else Service()
         driver = webdriver.Chrome(service=service, options=chrome_options)
 
-    driver.set_page_load_timeout(45)
+    driver.set_page_load_timeout(15)
     driver.set_script_timeout(25)
     driver.implicitly_wait(3)
 
@@ -1427,13 +1427,8 @@ def main():
         http_session = None
 
         if on_cloud:
-            st.info("☁️ **Streamlit Cloud Mode**: Attempting browser-based scraping...")
-            try:
-                driver = get_driver(use_headless=True)
-                st.success("✅ Browser initialized on cloud!")
-            except Exception as e:
-                st.warning(f"⚠️ Browser unavailable on cloud, falling back to HTTP: {str(e)[:100]}")
-                http_session = create_http_session()
+            st.info("☁️ **Streamlit Cloud Mode**: Using HTTP (browser not reliable on cloud)")
+            http_session = create_http_session()
         elif mode != "Manual Links":
             with st.spinner("🔄 Initializing scraper..."):
                 try:
