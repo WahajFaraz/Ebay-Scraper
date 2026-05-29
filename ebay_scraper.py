@@ -1192,17 +1192,6 @@ def scrape_all_products(urls, selenium_driver=None, use_headless=True, max_worke
             on_progress(progress["done"], total, progress["scraped"])
     return all_data
 
-st.set_page_config(
-    page_title="eBay Store Scraper",
-    page_icon="🛒",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
-
-st.title("🛒 eBay Store Scraper")
-st.markdown("---")
-
-
 def _get_all_product_links_ui(store_url, driver, progress_bar, total_products=None):
     def on_progress(page, max_pages, found, new_items, total_links):
         progress_ratio = min(page / max(max_pages, 1), 1.0)
@@ -1297,6 +1286,14 @@ def is_streamlit_cloud():
 
 
 def main():
+    st.set_page_config(
+        page_title="eBay Store Scraper",
+        page_icon="🛒",
+        layout="wide",
+        initial_sidebar_state="expanded",
+    )
+    st.title("🛒 eBay Store Scraper")
+    st.markdown("---")
     st.sidebar.header("🔧 Scraper Settings")
 
     on_cloud = is_streamlit_cloud()
@@ -1661,7 +1658,6 @@ if __name__ == "__main__":
     try:
         main()
     except Exception as e:
-        import streamlit as st
         st.error(f"❌ App Error: {e}")
         st.code(traceback.format_exc())
         st.stop()
