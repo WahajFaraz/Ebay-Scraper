@@ -110,45 +110,28 @@ window.navigator.permissions.query = (parameters) => (
 
 
 def find_chromedriver():
-    # Common paths across platforms
+    """Find a system chromedriver, or let Selenium Manager auto-detect."""
     candidates = [
         # Windows — selenium cache
         os.path.expanduser(r"~\.cache\selenium\chromedriver\win64\148.0.7778.178\chromedriver.exe"),
         os.path.expanduser(r"~\.cache\selenium\chromedriver\win64\148.0.7778.167\chromedriver.exe"),
         os.path.expanduser(r"~\.cache\selenium\chromedriver\win64\147.0.7727.117\chromedriver.exe"),
         os.path.expanduser(r"~\.cache\selenium\chromedriver\win64\147.0.7727.56\chromedriver.exe"),
-        os.path.expanduser(r"~\.wdm\drivers\chromedriver\win64\114.0.5735.90\chromedriver.exe"),
-        # Windows — webdriver-manager cache
-        os.path.expanduser(r"~\.wdm\drivers\chromedriver\win64\*\chromedriver.exe"),
-        # Linux — apt / snap
+        # Linux — apt
         "/usr/bin/chromedriver",
         "/usr/local/bin/chromedriver",
-        "/snap/bin/chromium.chromedriver",
         "/usr/lib/chromium-browser/chromedriver",
         "/usr/lib/chromium/chromedriver",
-        "/usr/bin/chromium-browser",
         # macOS
         "/usr/local/bin/chromedriver",
         "/opt/homebrew/bin/chromedriver",
     ]
     for p in candidates:
-        if "*" in p:
-            from glob import glob as _glob
-            matches = _glob(p)
-            if matches:
-                log.info(f"Using chromedriver: {matches[0]}")
-                return matches[0]
-        elif os.path.isfile(p):
+        if os.path.isfile(p):
             log.info(f"Using chromedriver: {p}")
             return p
-    # Fallback: auto-download via webdriver-manager
-    try:
-        from webdriver_manager.chrome import ChromeDriverManager
-        path = ChromeDriverManager().install()
-        log.info(f"Auto-downloaded chromedriver: {path}")
-        return path
-    except Exception:
-        pass
+    # None found — Selenium Manager will handle it automatically
+    log.info("No system chromedriver found — Selenium Manager will auto-resolve")
     return None
 
 
