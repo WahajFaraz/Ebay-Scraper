@@ -1,5 +1,4 @@
-chromium-browser
-chromium-chromedriver
+chromium
 libnss3
 libnspr4
 libatk1.0-0
