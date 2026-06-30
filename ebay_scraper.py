@@ -554,11 +554,15 @@ class ListingScraper:
         else:
             store_url += "?_ipg=240"
         self._scrape_pages(store_url, "store")
+        if SCRAPE_STATE.get("stop"):
+            return
         # Phase B: scrape search pages for any missed products (active listings)
         if self.seller_name and self.products:
             search_url = f"https://www.ebay.com/sch/i.html?_ssn={self.seller_name}&_ipg=240"
             self._scrape_pages(search_url, "search")
             log.info(f"Total after search: {len(self.products)} products")
+        if SCRAPE_STATE.get("stop"):
+            return
         # Phase C: also check completed/sold items
         if self.seller_name and self.products:
             completed_url = f"https://www.ebay.com/sch/i.html?_ssn={self.seller_name}&_ipg=240&LH_Complete=1&LH_Sold=0"
@@ -570,7 +574,7 @@ class ListingScraper:
         consecutive_empty = 0
         consecutive_security = 0
 
-        while page <= MAX_PAGES:
+        while page <= MAX_PAGES and not SCRAPE_STATE.get("stop"):
             url = build_page_url(base_url, page)
             log.info(f"[{mode}] Page {page} -> {url}")
 
@@ -1410,6 +1414,10 @@ def main():
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
         futures = {pool.submit(detail_scraper.scrape, p): p for p in all_products}
         for future in as_completed(futures):
+            if SCRAPE_STATE.get("stop"):
+                for ff in futures:
+                    ff.cancel()
+                break
             try:
                 future.result()
             except Exception as e:
@@ -1421,9 +1429,10 @@ def main():
                 export_csv(all_products)
                 log.info(f"  Details: {completed}/{len(all_products)}")
 
-    log.info("--- Phase 2 complete ---")
-    export_csv(all_products)
-    SCRAPE_STATE["phase"] = "done"
+    if not SCRAPE_STATE.get("stop"):
+        log.info("--- Phase 2 complete ---")
+        export_csv(all_products)
+        SCRAPE_STATE["phase"] = "done"
 
     elapsed = time.time() - start
     log.info(f"Total time: {elapsed:.1f}s | Products: {len(all_products)}")

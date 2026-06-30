@@ -1,6 +1,5 @@
 import os
 import re
-import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -13,6 +12,21 @@ from ebay_scraper import (
 )
 
 st.set_page_config(page_title="eBay Store Scraper", page_icon="🛒", layout="centered")
+
+dark_mode = st.toggle("Dark Mode", value=False)
+if dark_mode:
+    st.markdown("""
+<style>
+.stApp { background-color: #0e1117 !important; color: #fafafa !important; }
+.stApp header { background-color: #0e1117 !important; }
+.stTextInput input { background-color: #262730 !important; color: #fafafa !important; }
+.stButton button { background-color: #262730 !important; color: #fafafa !important; border: 1px solid #555 !important; }
+.stButton button:hover { border-color: #1a73e8 !important; }
+.stAlert, .stInfo, .stSuccess, .stError { background-color: #262730 !important; }
+[data-testid="stMarkdownContainer"] { color: #fafafa !important; }
+</style>
+""", unsafe_allow_html=True)
+
 st.title("eBay Store Scraper")
 st.markdown("Enter an eBay store URL and download all products as CSV")
 
@@ -35,6 +49,9 @@ def _run_scrape(url):
         listing.scrape_listings()
         listing._quit_driver()
 
+        if EB_SCRAPE_STATE.get("stop"):
+            return
+
         products = listing.products
         EB_SCRAPE_STATE["total"] = len(products)
 
@@ -42,17 +59,23 @@ def _run_scrape(url):
             export_csv([], out_path)
             EB_SCRAPE_STATE["output_file"] = out_path
             EB_SCRAPE_STATE["done"] = True
-            EB_SCRAPE_STATE["running"] = False
             return
 
         detail = DetailScraper()
         with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
             futures = {pool.submit(detail.scrape, p): p for p in products}
             for f in as_completed(futures):
+                if EB_SCRAPE_STATE.get("stop"):
+                    for ff in futures:
+                        ff.cancel()
+                    break
                 try:
                     f.result()
                 except Exception as e:
                     log.error(f"Detail worker failed: {e}")
+
+        if EB_SCRAPE_STATE.get("stop"):
+            return
 
         export_csv(products, out_path)
         EB_SCRAPE_STATE["output_file"] = out_path
@@ -62,6 +85,7 @@ def _run_scrape(url):
         EB_SCRAPE_STATE["error"] = str(e)
     finally:
         EB_SCRAPE_STATE["running"] = False
+        EB_SCRAPE_STATE["stop"] = False
         log.info(f"Scrape finished in {time.time()-start:.1f}s")
 
 
@@ -72,23 +96,32 @@ store_url = st.text_input(
     disabled=EB_SCRAPE_STATE.get("running", False),
 )
 
-if st.button("Start Scraping", disabled=EB_SCRAPE_STATE.get("running", False), use_container_width=True):
-    if not store_url:
-        st.error("Please enter a store URL")
-        st.stop()
-    st.session_state.started = True
-    EB_SCRAPE_STATE["running"] = True
-    EB_SCRAPE_STATE["done"] = False
-    EB_SCRAPE_STATE["error"] = None
-    EB_SCRAPE_STATE["output_file"] = None
-    EB_SCRAPE_STATE["phase"] = ""
-    EB_SCRAPE_STATE["page"] = 0
-    EB_SCRAPE_STATE["products_found"] = 0
-    EB_SCRAPE_STATE["detail_progress"] = 0
-    EB_SCRAPE_STATE["detail_total"] = 0
-    EB_SCRAPE_STATE["total"] = 0
-    threading.Thread(target=_run_scrape, args=(store_url,), daemon=True).start()
-    st.rerun()
+col_a, col_b, _ = st.columns([1, 1, 2])
+with col_a:
+    if st.button("Start Scraping", disabled=EB_SCRAPE_STATE.get("running", False), use_container_width=True):
+        if not store_url:
+            st.error("Please enter a store URL")
+            st.stop()
+        st.session_state.started = True
+        EB_SCRAPE_STATE["running"] = True
+        EB_SCRAPE_STATE["done"] = False
+        EB_SCRAPE_STATE["stop"] = False
+        EB_SCRAPE_STATE["error"] = None
+        EB_SCRAPE_STATE["output_file"] = None
+        EB_SCRAPE_STATE["phase"] = ""
+        EB_SCRAPE_STATE["page"] = 0
+        EB_SCRAPE_STATE["products_found"] = 0
+        EB_SCRAPE_STATE["detail_progress"] = 0
+        EB_SCRAPE_STATE["detail_total"] = 0
+        EB_SCRAPE_STATE["total"] = 0
+        threading.Thread(target=_run_scrape, args=(store_url,), daemon=True).start()
+        st.rerun()
+
+with col_b:
+    if EB_SCRAPE_STATE.get("running", False):
+        if st.button("Stop", type="primary", use_container_width=True):
+            EB_SCRAPE_STATE["stop"] = True
+            st.rerun()
 
 out_path = EB_SCRAPE_STATE.get("output_file")
 if EB_SCRAPE_STATE.get("done") and out_path and os.path.exists(out_path):
@@ -114,7 +147,9 @@ if error:
 
 elif running:
     phase = EB_SCRAPE_STATE.get("phase", "")
-    if phase == "listing":
+    if EB_SCRAPE_STATE.get("stop"):
+        status_placeholder.warning("Stopping...")
+    elif phase == "listing":
         page = EB_SCRAPE_STATE.get("page", 0)
         pf = EB_SCRAPE_STATE.get("products_found", 0)
         status_placeholder.info(f"Scraping listings... Page {page} \u00b7 {pf} products found")
@@ -135,9 +170,6 @@ elif running:
 elif done:
     total = EB_SCRAPE_STATE.get("total", 0)
     status_placeholder.success(f"Complete! {total} products scraped")
-    out_path = EB_SCRAPE_STATE.get("output_file")
-    if out_path and os.path.exists(out_path):
-        st.info(f"Output file: `{out_path}`")
 
 elif not st.session_state.started:
     status_placeholder.info("Enter a store URL and click Start Scraping")
