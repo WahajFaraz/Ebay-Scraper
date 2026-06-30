@@ -11,6 +11,10 @@ from ebay_scraper import (
     SCRAPE_STATE as EB_SCRAPE_STATE,
 )
 
+# Persist scrape state across page refreshes (same session)
+if "scrape_ref" not in st.session_state:
+    st.session_state.scrape_ref = EB_SCRAPE_STATE
+
 st.set_page_config(page_title="eBay Store Scraper", page_icon="🛒", layout="centered")
 
 # ── Global Styles ──────────────────────────────────────────────
