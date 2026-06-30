@@ -211,23 +211,20 @@ running = EB_SCRAPE_STATE.get("running", False)
 done = EB_SCRAPE_STATE.get("done", False)
 
 if error:
-    status_placeholder.error(f"**Error** — {error}")
+    msg = f"❌ **Error** — {error}"
+    status_placeholder.error(msg)
 
 elif running:
     stopped = EB_SCRAPE_STATE.get("stop", False)
     phase = EB_SCRAPE_STATE.get("phase", "")
 
     if stopped:
-        badge = '<span class="badge badge-stop">STOPPING</span>'
-        status_placeholder.warning(f"{badge} Finishing current tasks…", unsafe_allow_html=True)
+        status_placeholder.warning("⏳ **Stopping…** Finishing current tasks")
 
     elif phase == "listing":
         page = EB_SCRAPE_STATE.get("page", 0)
         pf = EB_SCRAPE_STATE.get("products_found", 0)
-        badge = '<span class="badge badge-listing">LISTINGS</span>'
-        status_placeholder.info(
-            f"{badge} Page **{page}** · **{pf}** products found", unsafe_allow_html=True
-        )
+        status_placeholder.info(f"📋 **Scraping listings** — Page {page} · {pf} products found")
         metrics_placeholder.markdown(
             f'<div style="display:flex;gap:1rem;margin-top:0.5rem">'
             f'<div class="metric"><div class="metric-val">{page}</div><div class="metric-label">Pages</div></div>'
@@ -240,14 +237,10 @@ elif running:
         dp = EB_SCRAPE_STATE.get("detail_progress", 0)
         dt = EB_SCRAPE_STATE.get("detail_total", 0)
         total = EB_SCRAPE_STATE.get("total", 0)
-        badge = '<span class="badge badge-details">DETAILS</span>'
         if dt > 0:
             pct = dp / dt
-            progress_placeholder.progress(pct, text=f"")
-            status_placeholder.info(
-                f"{badge} **{dp}/{dt}** products processed · {total} total",
-                unsafe_allow_html=True,
-            )
+            progress_placeholder.progress(pct, text="")
+            status_placeholder.info(f"🔍 **Scraping details** — {dp}/{dt} products · {total} total")
             metrics_placeholder.markdown(
                 f'<div style="display:flex;gap:1rem;margin-top:0.5rem">'
                 f'<div class="metric"><div class="metric-val">{dp}</div><div class="metric-label">Done</div></div>'
@@ -257,19 +250,17 @@ elif running:
                 unsafe_allow_html=True,
             )
         else:
-            status_placeholder.info(f"{badge} Preparing…", unsafe_allow_html=True)
+            status_placeholder.info("🔍 Preparing detail scraping…")
 
     else:
-        badge = '<span class="badge badge-listing">STARTING</span>'
-        status_placeholder.info(f"{badge} Initializing browser…", unsafe_allow_html=True)
+        status_placeholder.info("🚀 **Starting…** Initializing browser")
 
     time.sleep(1)
     st.rerun()
 
 elif done:
     total = EB_SCRAPE_STATE.get("total", 0)
-    badge = '<span class="badge badge-done">COMPLETE</span>'
-    status_placeholder.success(f"{badge} Successfully scraped **{total}** products", unsafe_allow_html=True)
+    status_placeholder.success(f"✅ **Complete!** Scraped **{total}** products")
 
 elif not st.session_state.started:
     status_placeholder.info("Enter a store URL above and click **Start Scraping**")
