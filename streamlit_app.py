@@ -18,23 +18,25 @@ LIGHT_CSS = """
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
 html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
-.stApp { background: #f8f9fa; }
+.stApp { background: #1a1a1a; }
 .main > div { padding: 1rem 2rem; }
-h1 { font-weight: 700; font-size: 1.75rem !important; letter-spacing: -0.02em; }
-.card { background: #ffffff; border-radius: 12px; padding: 1.5rem; box-shadow: 0 1px 3px rgba(0,0,0,0.08); margin-bottom: 1rem; border: 1px solid #e9ecef; }
-.stButton button { border-radius: 8px; font-weight: 600; font-size: 0.9rem; height: 44px; transition: all 0.15s; }
+h1 { font-weight: 700; font-size: 1.75rem !important; letter-spacing: -0.02em; color: #ffffff !important; }
+p, span, label, [data-testid="stMarkdownContainer"] { color: #e0e0e0 !important; }
+.card { background: #2a2a2a; border-radius: 12px; padding: 1.5rem; box-shadow: 0 2px 8px rgba(0,0,0,0.3); margin-bottom: 1rem; border: 1px solid #3a3a3a; }
+.stButton button { border-radius: 8px; font-weight: 600; font-size: 0.9rem; height: 44px; transition: all 0.15s; background-color: #3a3a3a !important; color: #ffffff !important; border: 1px solid #4a4a4a !important; }
+.stButton button:hover { border-color: #e53935 !important; }
 .stButton button:active { transform: scale(0.97); }
-.stTextInput input { border-radius: 8px; border: 1px solid #dee2e6; font-size: 0.9rem; }
-.stTextInput input:focus { border-color: #1a73e8; box-shadow: 0 0 0 3px rgba(26,115,232,0.15); }
-.stProgress > div > div > div { background-color: #1a73e8 !important; border-radius: 4px; }
-.badge { display: inline-block; padding: 3px 10px; border-radius: 20px; font-size: 0.75rem; font-weight: 600; letter-spacing: 0.02em; }
-.badge-listing { background: #e3f2fd; color: #1565c0; }
-.badge-details { background: #fce4ec; color: #c62828; }
-.badge-done { background: #e8f5e9; color: #2e7d32; }
-.badge-stop { background: #fff3e0; color: #e65100; }
-.metric { text-align: center; padding: 0.75rem; background: #f8f9fa; border-radius: 8px; border: 1px solid #e9ecef; }
-.metric-val { font-size: 1.5rem; font-weight: 700; color: #1a73e8; line-height: 1.2; }
-.metric-label { font-size: 0.75rem; color: #6c757d; text-transform: uppercase; letter-spacing: 0.05em; margin-top: 2px; }
+.stTextInput input { border-radius: 8px; border: 1px solid #4a4a4a !important; font-size: 0.9rem; background-color: #3a3a3a !important; color: #ffffff !important; }
+.stTextInput input:focus { border-color: #e53935 !important; box-shadow: 0 0 0 3px rgba(229,57,53,0.2) !important; }
+.stProgress > div > div > div { background-color: #e53935 !important; border-radius: 4px; }
+.stProgress > div > div { background-color: #3a3a3a !important; }
+.metric { text-align: center; padding: 0.75rem; background: #3a3a3a !important; border-radius: 8px; border: 1px solid #4a4a4a !important; }
+.metric-val { font-size: 1.5rem; font-weight: 700; color: #e53935; line-height: 1.2; }
+.metric-label { font-size: 0.75rem; color: #9e9e9e; text-transform: uppercase; letter-spacing: 0.05em; margin-top: 2px; }
+.stAlert, .stInfo, .stSuccess, .stError { background-color: #2a2a2a !important; border: 1px solid #3a3a3a !important; color: #e0e0e0 !important; }
+[data-testid="stNotification"] { background-color: #2a2a2a !important; }
+div[data-testid="stDownloadButton"] button { background-color: #e53935 !important; color: white !important; border: none !important; }
+div[data-testid="stDownloadButton"] button:hover { background-color: #b71c1c !important; }
 </style>
 """
 
@@ -42,30 +44,25 @@ DARK_CSS = """
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
 html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
-.stApp { background: #0e1117 !important; color: #e8eaed !important; }
+.stApp { background: #000000 !important; color: #e0e0e0 !important; }
 .main > div { padding: 1rem 2rem; }
-h1 { font-weight: 700; font-size: 1.75rem !important; letter-spacing: -0.02em; color: #e8eaed !important; }
-h2, h3, p, span, label, [data-testid="stMarkdownContainer"] { color: #e8eaed !important; }
-.card { background: #1e2028 !important; border-radius: 12px; padding: 1.5rem; box-shadow: 0 1px 3px rgba(0,0,0,0.3); margin-bottom: 1rem; border: 1px solid #2d2f3a !important; }
-.stButton button { border-radius: 8px; font-weight: 600; font-size: 0.9rem; height: 44px; transition: all 0.15s; background-color: #2d2f3a !important; color: #e8eaed !important; border: 1px solid #3d3f4a !important; }
-.stButton button:hover { border-color: #1a73e8 !important; }
+h1 { font-weight: 700; font-size: 1.75rem !important; letter-spacing: -0.02em; color: #ffffff !important; }
+h2, h3, p, span, label, [data-testid="stMarkdownContainer"] { color: #e0e0e0 !important; }
+.card { background: #0d0d0d !important; border-radius: 12px; padding: 1.5rem; box-shadow: 0 2px 8px rgba(0,0,0,0.5); margin-bottom: 1rem; border: 1px solid #2a2a2a !important; }
+.stButton button { border-radius: 8px; font-weight: 600; font-size: 0.9rem; height: 44px; transition: all 0.15s; background-color: #1a1a1a !important; color: #ffffff !important; border: 1px solid #3a3a3a !important; }
+.stButton button:hover { border-color: #e53935 !important; }
 .stButton button:active { transform: scale(0.97); }
-.stTextInput input { border-radius: 8px; border: 1px solid #3d3f4a !important; font-size: 0.9rem; background-color: #262730 !important; color: #e8eaed !important; }
-.stTextInput input:focus { border-color: #1a73e8 !important; box-shadow: 0 0 0 3px rgba(26,115,232,0.2) !important; }
-.stProgress > div > div > div { background-color: #1a73e8 !important; border-radius: 4px; }
-.stProgress > div > div { background-color: #2d2f3a !important; }
-.badge { display: inline-block; padding: 3px 10px; border-radius: 20px; font-size: 0.75rem; font-weight: 600; letter-spacing: 0.02em; }
-.badge-listing { background: #1a3a5c; color: #64b5f6; }
-.badge-details { background: #4a1c24; color: #ef9a9a; }
-.badge-done { background: #1b3d2b; color: #81c784; }
-.badge-stop { background: #4a2e1b; color: #ffb74d; }
-.metric { text-align: center; padding: 0.75rem; background: #262730 !important; border-radius: 8px; border: 1px solid #2d2f3a !important; }
-.metric-val { font-size: 1.5rem; font-weight: 700; color: #64b5f6; line-height: 1.2; }
-.metric-label { font-size: 0.75rem; color: #9aa0a6; text-transform: uppercase; letter-spacing: 0.05em; margin-top: 2px; }
-.stAlert, .stInfo, .stSuccess, .stError { background-color: #262730 !important; border: 1px solid #2d2f3a !important; color: #e8eaed !important; }
-[data-testid="stNotification"] { background-color: #262730 !important; }
-div[data-testid="stDownloadButton"] button { background-color: #1a73e8 !important; color: white !important; border: none !important; }
-div[data-testid="stDownloadButton"] button:hover { background-color: #1557b0 !important; }
+.stTextInput input { border-radius: 8px; border: 1px solid #3a3a3a !important; font-size: 0.9rem; background-color: #1a1a1a !important; color: #ffffff !important; }
+.stTextInput input:focus { border-color: #e53935 !important; box-shadow: 0 0 0 3px rgba(229,57,53,0.25) !important; }
+.stProgress > div > div > div { background-color: #e53935 !important; border-radius: 4px; }
+.stProgress > div > div { background-color: #1a1a1a !important; }
+.metric { text-align: center; padding: 0.75rem; background: #1a1a1a !important; border-radius: 8px; border: 1px solid #2a2a2a !important; }
+.metric-val { font-size: 1.5rem; font-weight: 700; color: #e53935; line-height: 1.2; }
+.metric-label { font-size: 0.75rem; color: #757575; text-transform: uppercase; letter-spacing: 0.05em; margin-top: 2px; }
+.stAlert, .stInfo, .stSuccess, .stError { background-color: #0d0d0d !important; border: 1px solid #2a2a2a !important; color: #e0e0e0 !important; }
+[data-testid="stNotification"] { background-color: #0d0d0d !important; }
+div[data-testid="stDownloadButton"] button { background-color: #e53935 !important; color: white !important; border: none !important; }
+div[data-testid="stDownloadButton"] button:hover { background-color: #b71c1c !important; }
 </style>
 """
 
