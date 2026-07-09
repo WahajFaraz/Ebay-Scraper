@@ -27,6 +27,7 @@ if EB_SCRAPE_STATE.get(SESSION_KEY) != st.session_state[SESSION_KEY]:
         "detail_progress": 0, "detail_total": 0, "total": 0,
         "running": False, "done": False, "stop": False,
         "error": None, "output_file": None,
+        "_run_id": 0,
         SESSION_KEY: st.session_state[SESSION_KEY],
     })
 
@@ -97,6 +98,7 @@ def _output_path(url, ext="xlsx"):
 def _run_scrape(url):
     start = time.time()
     out_path = _output_path(url, "xlsx")
+    run_id = EB_SCRAPE_STATE.get("_run_id", 0)
     try:
         listing = ListingScraper(url)
         listing._init_driver()
@@ -140,8 +142,9 @@ def _run_scrape(url):
             log.exception("Scrape failed")
             EB_SCRAPE_STATE["error"] = str(e)
     finally:
-        EB_SCRAPE_STATE["running"] = False
-        EB_SCRAPE_STATE["stop"] = False
+        if EB_SCRAPE_STATE.get("_run_id") == run_id:
+            EB_SCRAPE_STATE["running"] = False
+            EB_SCRAPE_STATE["stop"] = False
         log.info(f"Scrape finished in {time.time()-start:.1f}s")
 
 
@@ -162,6 +165,7 @@ with st.container():
             if not store_url:
                 st.error("Please enter a store URL")
                 st.stop()
+            EB_SCRAPE_STATE["_run_id"] = EB_SCRAPE_STATE.get("_run_id", 0) + 1
             EB_SCRAPE_STATE["running"] = True
             EB_SCRAPE_STATE["done"] = False
             EB_SCRAPE_STATE["stop"] = False
@@ -183,6 +187,11 @@ with st.container():
                 EB_SCRAPE_STATE["running"] = False
                 EB_SCRAPE_STATE["done"] = False
                 EB_SCRAPE_STATE["phase"] = ""
+                EB_SCRAPE_STATE["page"] = 0
+                EB_SCRAPE_STATE["products_found"] = 0
+                EB_SCRAPE_STATE["detail_progress"] = 0
+                EB_SCRAPE_STATE["detail_total"] = 0
+                EB_SCRAPE_STATE["total"] = 0
                 EB_SCRAPE_STATE["error"] = None
                 EB_SCRAPE_STATE["output_file"] = None
                 st.rerun()

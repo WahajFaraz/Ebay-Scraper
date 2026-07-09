@@ -61,6 +61,7 @@ SCRAPE_STATE = {
     "done": False,
     "error": None,
     "output_file": None,
+    "_run_id": 0,
 }
 
 USER_AGENTS = [
