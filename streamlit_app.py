@@ -184,6 +184,7 @@ with st.container():
         if EB_SCRAPE_STATE.get("running", False):
             if st.button("■ Stop", type="primary", use_container_width=True):
                 EB_SCRAPE_STATE["stop"] = True
+                EB_SCRAPE_STATE["_run_id"] = EB_SCRAPE_STATE.get("_run_id", 0) + 1
                 EB_SCRAPE_STATE["running"] = False
                 EB_SCRAPE_STATE["done"] = False
                 EB_SCRAPE_STATE["phase"] = ""

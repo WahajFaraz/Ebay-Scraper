@@ -574,14 +574,16 @@ class ListingScraper:
         page = 1
         consecutive_empty = 0
         consecutive_security = 0
+        my_run_id = SCRAPE_STATE.get("_run_id", 0)
 
         while page <= MAX_PAGES and not SCRAPE_STATE.get("stop"):
             url = build_page_url(base_url, page)
             log.info(f"[{mode}] Page {page} -> {url}")
 
-            SCRAPE_STATE["phase"] = "listing"
-            SCRAPE_STATE["page"] = page
-            SCRAPE_STATE["products_found"] = len(self.products)
+            if SCRAPE_STATE.get("_run_id") == my_run_id:
+                SCRAPE_STATE["phase"] = "listing"
+                SCRAPE_STATE["page"] = page
+                SCRAPE_STATE["products_found"] = len(self.products)
 
             success = False
             for attempt in range(1, MAX_RETRIES + 1):
