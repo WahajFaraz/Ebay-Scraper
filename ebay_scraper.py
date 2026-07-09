@@ -42,11 +42,11 @@ OUTPUT_CSV = f"{_STORE_NAME}_products.csv"
 MAX_RETRIES = 4
 PAGE_TIMEOUT = 30
 DETAIL_TIMEOUT = 15
-MIN_DELAY = 0.3
-MAX_DELAY = 1.0
-DETAIL_MIN_DELAY = 0.15
-DETAIL_MAX_DELAY = 0.5
-MAX_WORKERS = 15
+MIN_DELAY = 0.1
+MAX_DELAY = 0.3
+DETAIL_MIN_DELAY = 0.0
+DETAIL_MAX_DELAY = 0.15
+MAX_WORKERS = 30
 MAX_PAGES = 500
 
 # Shared state for UI progress tracking (updated by ListingScraper and main)
@@ -609,11 +609,11 @@ class ListingScraper:
 
                     # Quick lazy-load scroll
                     try:
-                        for _ in range(3):
+                        for _ in range(2):
                             self.driver.execute_script(f"window.scrollTo(0, document.body.scrollHeight);")
-                            time.sleep(0.3)
+                            time.sleep(0.15)
                         self.driver.execute_script("window.scrollTo(0, 0);")
-                        time.sleep(0.2)
+                        time.sleep(0.1)
                     except Exception:
                         pass
 
@@ -1090,7 +1090,7 @@ class DetailScraper:
                 if resp.status_code != 200:
                     log.debug(f"Detail {url} -> {resp.status_code}")
                     if attempt < retries - 1:
-                        time.sleep(2)
+                        time.sleep(1)
                         continue
                     break
 
