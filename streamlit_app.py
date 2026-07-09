@@ -11,10 +11,6 @@ from ebay_scraper import (
     SCRAPE_STATE as EB_SCRAPE_STATE,
 )
 
-# Persist scrape state across page refreshes (same session)
-if "scrape_ref" not in st.session_state:
-    st.session_state.scrape_ref = EB_SCRAPE_STATE
-
 st.set_page_config(page_title="eBay Store Scraper", page_icon="🛒", layout="centered")
 
 # ── Global Styles ──────────────────────────────────────────────
@@ -106,9 +102,10 @@ def _run_scrape(url):
         EB_SCRAPE_STATE["total"] = len(products)
 
         if not products:
-            export_csv([], out_path)
-            EB_SCRAPE_STATE["output_file"] = out_path
-            EB_SCRAPE_STATE["done"] = True
+            if not EB_SCRAPE_STATE.get("stop"):
+                export_csv([], out_path)
+                EB_SCRAPE_STATE["output_file"] = out_path
+                EB_SCRAPE_STATE["done"] = True
             return
 
         detail = DetailScraper()
@@ -131,8 +128,9 @@ def _run_scrape(url):
         EB_SCRAPE_STATE["output_file"] = out_path
         EB_SCRAPE_STATE["done"] = True
     except Exception as e:
-        log.exception("Scrape failed")
-        EB_SCRAPE_STATE["error"] = str(e)
+        if not EB_SCRAPE_STATE.get("stop"):
+            log.exception("Scrape failed")
+            EB_SCRAPE_STATE["error"] = str(e)
     finally:
         EB_SCRAPE_STATE["running"] = False
         EB_SCRAPE_STATE["stop"] = False
@@ -175,6 +173,13 @@ with st.container():
         if EB_SCRAPE_STATE.get("running", False):
             if st.button("■ Stop", type="primary", use_container_width=True):
                 EB_SCRAPE_STATE["stop"] = True
+                # Full immediate reset
+                EB_SCRAPE_STATE["running"] = False
+                EB_SCRAPE_STATE["done"] = False
+                EB_SCRAPE_STATE["phase"] = ""
+                EB_SCRAPE_STATE["error"] = None
+                EB_SCRAPE_STATE["output_file"] = None
+                st.session_state.started = False
                 st.rerun()
     st.markdown('</div>', unsafe_allow_html=True)
 
