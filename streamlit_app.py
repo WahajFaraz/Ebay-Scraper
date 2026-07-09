@@ -13,6 +13,23 @@ from ebay_scraper import (
 
 st.set_page_config(page_title="eBay Store Scraper", page_icon="🛒", layout="centered")
 
+# ── Page refresh detection — reset stale scrape state ──────────
+SESSION_KEY = "_session_id"
+if SESSION_KEY not in st.session_state:
+    st.session_state[SESSION_KEY] = str(time.monotonic())
+
+if EB_SCRAPE_STATE.get(SESSION_KEY) != st.session_state[SESSION_KEY]:
+    # Stale state from previous session: signal any lingering thread to stop
+    EB_SCRAPE_STATE["stop"] = True
+    EB_SCRAPE_STATE.clear()
+    EB_SCRAPE_STATE.update({
+        "phase": "", "page": 0, "products_found": 0,
+        "detail_progress": 0, "detail_total": 0, "total": 0,
+        "running": False, "done": False, "stop": False,
+        "error": None, "output_file": None,
+        SESSION_KEY: st.session_state[SESSION_KEY],
+    })
+
 # ── Global Styles ──────────────────────────────────────────────
 LIGHT_CSS = """
 <style>
