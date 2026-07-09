@@ -1368,6 +1368,106 @@ def export_csv(products, path=OUTPUT_CSV):
 
 
 # =====================================================================
+# Excel Export
+# =====================================================================
+
+def export_excel(products, path):
+    if not products:
+        log.warning("No products to export")
+        # Still write an empty workbook so file exists for download
+        try:
+            import openpyxl
+            wb = openpyxl.Workbook()
+            ws = wb.active
+            ws.title = "Products"
+            ws.append(["Title", "Price", "Brand", "Model", "MPN", "Description", "Image URL", "URL"])
+            wb.save(path)
+            log.info(f"Exported {len(products)} products -> {os.path.abspath(path)}")
+        except ImportError:
+            log.error("openpyxl not installed, cannot create Excel file. Install: pip install openpyxl")
+        except Exception as e:
+            log.error(f"Failed to write Excel: {e}")
+        return
+
+    try:
+        import openpyxl
+        from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    except ImportError:
+        log.error("openpyxl not installed, cannot create Excel file. Install: pip install openpyxl")
+        return
+
+    fieldnames = [
+        "title", "price", "brand", "model", "mpn",
+        "description", "image_url", "url",
+    ]
+
+    for attempt in range(3):
+        try:
+            wb = openpyxl.Workbook()
+            ws = wb.active
+            ws.title = "Products"
+
+            # Header styling
+            header_font = Font(bold=True, color="FFFFFF", size=11)
+            header_fill = PatternFill(start_color="e53935", end_color="e53935", fill_type="solid")
+            header_alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+            thin_border = Border(
+                left=Side(style="thin"),
+                right=Side(style="thin"),
+                top=Side(style="thin"),
+                bottom=Side(style="thin"),
+            )
+
+            # Write headers
+            headers = ["Title", "Price", "Brand", "Model", "MPN", "Description", "Image URL", "URL"]
+            for col, h in enumerate(headers, 1):
+                cell = ws.cell(row=1, column=col, value=h)
+                cell.font = header_font
+                cell.fill = header_fill
+                cell.alignment = header_alignment
+                cell.border = thin_border
+
+            # Write data
+            for row_idx, p in enumerate(products, 2):
+                values = [p.get(k, "") for k in fieldnames]
+                for col_idx, val in enumerate(values, 1):
+                    cell = ws.cell(row=row_idx, column=col_idx, value=val)
+                    cell.border = thin_border
+                    if col_idx == 1:  # Title column
+                        cell.font = Font(bold=True)
+
+            # Auto-adjust column widths (cap at 60)
+            for col in range(1, len(headers) + 1):
+                max_len = len(str(headers[col - 1]))
+                for row in range(2, len(products) + 2):
+                    val = ws.cell(row=row, column=col).value
+                    if val:
+                        max_len = max(max_len, min(len(str(val)), 60))
+                ws.column_dimensions[openpyxl.utils.get_column_letter(col)].width = max_len + 2
+
+            # Freeze header row
+            ws.freeze_panes = "A2"
+
+            wb.save(path)
+            log.info(f"Exported {len(products)} products -> {os.path.abspath(path)}")
+            return
+
+        except PermissionError:
+            if attempt < 2:
+                log.warning(f"Excel locked (attempt {attempt+1}), retrying in 3s...")
+                time.sleep(3)
+            else:
+                log.error(f"Cannot write Excel (file locked), saved as {path}.bak")
+                try:
+                    wb.save(path + ".bak")
+                except Exception:
+                    pass
+        except Exception as e:
+            log.error(f"Excel export failed: {e}")
+            return
+
+
+# =====================================================================
 # Main
 # =====================================================================
 

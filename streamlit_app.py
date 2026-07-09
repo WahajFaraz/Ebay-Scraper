@@ -7,7 +7,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import streamlit as st
 
 from ebay_scraper import (
-    ListingScraper, DetailScraper, export_csv, log, MAX_WORKERS,
+    ListingScraper, DetailScraper, export_excel, log, MAX_WORKERS,
     SCRAPE_STATE as EB_SCRAPE_STATE,
 )
 
@@ -34,7 +34,6 @@ p, span, label, [data-testid="stMarkdownContainer"] { color: #e0e0e0 !important;
 .metric-val { font-size: 1.5rem; font-weight: 700; color: #e53935; line-height: 1.2; }
 .metric-label { font-size: 0.75rem; color: #9e9e9e; text-transform: uppercase; letter-spacing: 0.05em; margin-top: 2px; }
 .stAlert, .stInfo, .stSuccess, .stError { background-color: #2a2a2a !important; border: 1px solid #3a3a3a !important; color: #e0e0e0 !important; }
-[data-testid="stNotification"] { background-color: #2a2a2a !important; }
 div[data-testid="stDownloadButton"] button { background-color: #e53935 !important; color: white !important; border: none !important; }
 div[data-testid="stDownloadButton"] button:hover { background-color: #b71c1c !important; }
 </style>
@@ -60,35 +59,27 @@ h2, h3, p, span, label, [data-testid="stMarkdownContainer"] { color: #e0e0e0 !im
 .metric-val { font-size: 1.5rem; font-weight: 700; color: #e53935; line-height: 1.2; }
 .metric-label { font-size: 0.75rem; color: #757575; text-transform: uppercase; letter-spacing: 0.05em; margin-top: 2px; }
 .stAlert, .stInfo, .stSuccess, .stError { background-color: #0d0d0d !important; border: 1px solid #2a2a2a !important; color: #e0e0e0 !important; }
-[data-testid="stNotification"] { background-color: #0d0d0d !important; }
 div[data-testid="stDownloadButton"] button { background-color: #e53935 !important; color: white !important; border: none !important; }
 div[data-testid="stDownloadButton"] button:hover { background-color: #b71c1c !important; }
 </style>
 """
 
-# ── App ────────────────────────────────────────────────────────
 dark_mode = st.toggle("Dark Mode", value=False)
 st.markdown(DARK_CSS if dark_mode else LIGHT_CSS, unsafe_allow_html=True)
 
-# Header
-col_title, _ = st.columns([3, 1])
-with col_title:
-    st.title("🛒 eBay Store Scraper")
-    st.markdown("Extract all products from any eBay store in seconds")
-
-if "started" not in st.session_state:
-    st.session_state.started = False
+st.title("🛒 eBay Store Scraper")
+st.markdown("Extract all products from any eBay store in seconds")
 
 
-def _output_path(url):
+def _output_path(url, ext="xlsx"):
     m = re.search(r"/str/([^/?]+)", url)
     name = m.group(1) if m else "store"
-    return os.path.abspath(f"{name}_products.csv")
+    return os.path.abspath(f"{name}_products.{ext}")
 
 
 def _run_scrape(url):
     start = time.time()
-    out_path = _output_path(url)
+    out_path = _output_path(url, "xlsx")
     try:
         listing = ListingScraper(url)
         listing._init_driver()
@@ -102,8 +93,8 @@ def _run_scrape(url):
         EB_SCRAPE_STATE["total"] = len(products)
 
         if not products:
+            export_excel([], out_path)
             if not EB_SCRAPE_STATE.get("stop"):
-                export_csv([], out_path)
                 EB_SCRAPE_STATE["output_file"] = out_path
                 EB_SCRAPE_STATE["done"] = True
             return
@@ -124,7 +115,7 @@ def _run_scrape(url):
         if EB_SCRAPE_STATE.get("stop"):
             return
 
-        export_csv(products, out_path)
+        export_excel(products, out_path)
         EB_SCRAPE_STATE["output_file"] = out_path
         EB_SCRAPE_STATE["done"] = True
     except Exception as e:
@@ -154,7 +145,6 @@ with st.container():
             if not store_url:
                 st.error("Please enter a store URL")
                 st.stop()
-            st.session_state.started = True
             EB_SCRAPE_STATE["running"] = True
             EB_SCRAPE_STATE["done"] = False
             EB_SCRAPE_STATE["stop"] = False
@@ -173,13 +163,11 @@ with st.container():
         if EB_SCRAPE_STATE.get("running", False):
             if st.button("■ Stop", type="primary", use_container_width=True):
                 EB_SCRAPE_STATE["stop"] = True
-                # Full immediate reset
                 EB_SCRAPE_STATE["running"] = False
                 EB_SCRAPE_STATE["done"] = False
                 EB_SCRAPE_STATE["phase"] = ""
                 EB_SCRAPE_STATE["error"] = None
                 EB_SCRAPE_STATE["output_file"] = None
-                st.session_state.started = False
                 st.rerun()
     st.markdown('</div>', unsafe_allow_html=True)
 
@@ -192,18 +180,23 @@ if EB_SCRAPE_STATE.get("done") and out_path and os.path.exists(out_path):
     size_str = f"{size/1024:.1f} KB" if size < 1024*1024 else f"{size/(1024*1024):.1f} MB"
     with st.container():
         st.markdown('<div class="card">', unsafe_allow_html=True)
-        c1, c2 = st.columns([2, 1])
+        c1, c2, c3 = st.columns([2, 1, 1])
         with c1:
             st.markdown(f"**✅ {name}**  \n{size_str}")
         with c2:
             with open(out_path, "rb") as f:
                 st.download_button(
-                    "⬇ Download CSV",
+                    "⬇ Download",
                     f,
                     file_name=name,
-                    mime="text/csv",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     use_container_width=True,
                 )
+        with c3:
+            if st.button("✕ New Scrape", use_container_width=True):
+                EB_SCRAPE_STATE["done"] = False
+                EB_SCRAPE_STATE["output_file"] = None
+                st.rerun()
         st.markdown('</div>', unsafe_allow_html=True)
 
 
@@ -217,8 +210,7 @@ running = EB_SCRAPE_STATE.get("running", False)
 done = EB_SCRAPE_STATE.get("done", False)
 
 if error:
-    msg = f"❌ **Error** — {error}"
-    status_placeholder.error(msg)
+    status_placeholder.error(f"❌ **Error** — {error}")
 
 elif running:
     stopped = EB_SCRAPE_STATE.get("stop", False)
@@ -226,7 +218,6 @@ elif running:
 
     if stopped:
         status_placeholder.warning("⏳ **Stopping…** Finishing current tasks")
-
     elif phase == "listing":
         page = EB_SCRAPE_STATE.get("page", 0)
         pf = EB_SCRAPE_STATE.get("products_found", 0)
@@ -238,7 +229,6 @@ elif running:
             f'</div>',
             unsafe_allow_html=True,
         )
-
     elif phase == "details":
         dp = EB_SCRAPE_STATE.get("detail_progress", 0)
         dt = EB_SCRAPE_STATE.get("detail_total", 0)
@@ -257,7 +247,6 @@ elif running:
             )
         else:
             status_placeholder.info("🔍 Preparing detail scraping…")
-
     else:
         status_placeholder.info("🚀 **Starting…** Initializing browser")
 
@@ -268,5 +257,5 @@ elif done:
     total = EB_SCRAPE_STATE.get("total", 0)
     status_placeholder.success(f"✅ **Complete!** Scraped **{total}** products")
 
-elif not st.session_state.started:
+else:
     status_placeholder.info("Enter a store URL above and click **Start Scraping**")
