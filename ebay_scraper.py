@@ -208,7 +208,8 @@ def is_security_page(driver):
 
 class ListingScraper:
 
-    # Store page layout
+    # Store page layout — only use specific store card selectors
+    # Avoid broad selectors like li.s-item that match recommendation carousels
     STORE_CARD_SELECTORS = [
         "article.str-item-card",
         ".str-item-card",
@@ -216,18 +217,13 @@ class ListingScraper:
         ".store-item-card",
         "[data-testid='store-item-card']",
         ".str-card",
-        "li.s-item",
     ]
 
-    # Search results layout (fallback)
+    # Search results layout (fallback) — only use specific selectors
     SEARCH_SELECTORS = [
-        ".s-item",
         ".brwrvr-item",
-        "li[data-view*='mi:']",
-        ".b-list__items_nolist li",
         "[data-testid='product-card']",
         ".rst-scroll-items li",
-        ".srp-results li",
     ]
 
     PAGINATION_NEXT = [
@@ -322,7 +318,8 @@ class ListingScraper:
                 var containers = document.querySelectorAll(
                     '#mainContent, .str-container, .str-storefront, ' +
                     '[data-testid="storefront"], .str-items, .str-item-list, ' +
-                    '.srp-results, .str-search-results, #Content, .content-wrapper'
+                    '.srp-results, .str-search-results, #Content, .content-wrapper, ' +
+                    '.str-item-grid, .str-items-grid, [data-testid="item-grid"]'
                 );
                 for (var i = 0; i < containers.length; i++) {
                     if (isDescendant(containers[i], arguments[0])) return true;
@@ -333,11 +330,48 @@ class ListingScraper:
         except Exception:
             return True  # If check fails, assume it's in main content
 
+    def _is_recommendation_section(self, element):
+        """Check if an element is within a recommendation/related items section."""
+        try:
+            result = self.driver.execute_script("""
+                function isDescendant(parent, child) {
+                    var node = child.parentNode;
+                    while (node != null) {
+                        if (node == parent) return true;
+                        node = node.parentNode;
+                    }
+                    return false;
+                }
+                // Known recommendation section selectors
+                var recSelectors = [
+                    '.str-recommendations', '.recommendations',
+                    '[data-testid="recommendations"]', '.related-items',
+                    '.similar-items', '.you-may-also-like',
+                    '.str-related-items', '.str-carousel',
+                    '.str-recommendation', '.rec-section',
+                    '.str-items-carousel', '.items-carousel'
+                ];
+                for (var i = 0; i < recSelectors.length; i++) {
+                    var recs = document.querySelectorAll(recSelectors[i]);
+                    for (var j = 0; j < recs.length; j++) {
+                        if (isDescendant(recs[j], arguments[0])) return true;
+                    }
+                }
+                return false;
+            """, element)
+            return result
+        except Exception:
+            return False
+
     def _extract_from_card(self, card):
         item = {}
 
         # Check if card is within main content area
         if not self._is_in_main_content(card):
+            return None
+
+        # Skip recommendation sections
+        if self._is_recommendation_section(card):
             return None
 
         # Title and URL from the link
@@ -415,6 +449,10 @@ class ListingScraper:
 
         # Check if element is within main content area
         if not self._is_in_main_content(elem):
+            return None
+
+        # Skip recommendation sections
+        if self._is_recommendation_section(elem):
             return None
 
         for sel in [".s-item__title span", ".s-item__title", ".item__title", "h3", "[data-testid='item-title']"]:
@@ -602,14 +640,16 @@ class ListingScraper:
         if SCRAPE_STATE.get("stop"):
             return
         # Phase B: scrape search pages for any missed products (active listings)
-        if self.seller_name and self.products:
+        # Only do this if store pages found nothing (different page layout)
+        if self.seller_name and not self.products:
             search_url = f"https://www.ebay.com/sch/i.html?_ssn={self.seller_name}&_ipg=240"
             self._scrape_pages(search_url, "search")
             log.info(f"Total after search: {len(self.products)} products")
         if SCRAPE_STATE.get("stop"):
             return
         # Phase C: also check completed/sold items
-        if self.seller_name and self.products:
+        # Only do this if store pages found nothing
+        if self.seller_name and not self.products:
             completed_url = f"https://www.ebay.com/sch/i.html?_ssn={self.seller_name}&_ipg=240&LH_Complete=1&LH_Sold=0"
             self._scrape_pages(completed_url, "completed")
             log.info(f"Total after completed: {len(self.products)} products")
