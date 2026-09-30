@@ -6,10 +6,20 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from flask import Flask, jsonify, request, send_file
+try:
+    from flask import Flask, jsonify, request, send_file
+    FLASK_AVAILABLE = True
+except ImportError:
+    FLASK_AVAILABLE = False
 
 from ebay_scraper import (ListingScraper, DetailScraper, export_csv, log,
                           MAX_WORKERS, SCRAPE_STATE as EB_SCRAPE_STATE)
+
+if not FLASK_AVAILABLE:
+    print("Flask not available. Install with: pip install flask")
+    print("The Flask API is not available, but the Streamlit app will still work.")
+    import sys
+    sys.exit(0)
 
 app = Flask(__name__)
 
